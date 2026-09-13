@@ -26,9 +26,10 @@
   - SCK -> Pin 23 (GPIO 11 / SPI0 SCLK)
   - MOSI -> Pin 19 (GPIO 10 / SPI0 MOSI)
   - MISO -> Pin 21 (GPIO 9 / SPI0 MISO)
-- **Pixhawk Flight Controller**:
-  - Option A: USB to Raspberry Pi (`/dev/ttyACM0` at 115200 baud)
-  - Option B: TELEM2 UART to Pin 8/10 (`/dev/serial0` at 57600 baud)
+- **Pixhawk Flight Controller (TELEM2 UART @ 115200 baud)**:
+  - Pixhawk TX (Pin 2) -> Pi Pin 10 (GPIO 15 / RXD)
+  - Pixhawk RX (Pin 3) -> Pi Pin 8 (GPIO 14 / TXD)
+  - Pixhawk GND (Pin 6) -> Pi Pin 9 (Ground)
 
 ### 📡 Radio Profile
 - Channel: 90 (2.490 GHz)
@@ -37,17 +38,13 @@
 - CRC: 16-bit
 - Auto-ACK: Disabled (Broadcast)
 
-### 🚀 Running the Pi Transmitter
+### 🚀 Running on Boot (Auto-Start)
 
-1. Install dependencies:
+To set up the script to run automatically on Raspberry Pi boot:
 ```bash
-pip3 install -r pi/requirements.txt
+./setup_autostart.sh
 ```
-2. Test simulated telemetry broadcast:
-```bash
-python3 pi/simulate_telemetry_tx.py
-```
-3. Run live Pixhawk MAVLink stream:
-```bash
-python3 pi/pixhawk_telemetry_tx.py --port /dev/ttyACM0 --baud 115200
-```
+
+- View live telemetry logs: `journalctl -u drone-telemetry.service -f`
+- Check service status: `sudo systemctl status drone-telemetry.service`
+- Disable autostart: `./disable_autostart.sh`

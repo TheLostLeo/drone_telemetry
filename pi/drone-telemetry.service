@@ -1,0 +1,18 @@
+[Unit]
+Description=Drone Telemetry NRF24 Transmitter Service
+After=network.target local-fs.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/drone_telemetry/pi
+ExecStart=/home/pi/drone_telemetry/pi/venv/bin/python3 /home/pi/drone_telemetry/pi/pixhawk_telemetry_tx.py --port /dev/serial0 --baud 115200
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
