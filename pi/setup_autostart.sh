@@ -11,7 +11,7 @@ USER_HOME=$(eval echo "~$CURRENT_USER")
 SERVICE_NAME="drone-telemetry.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 
-# Detect Python interpreter (prefer virtualenv if exists, otherwise system python3)
+# Detect Python interpreter
 if [ -f "${SCRIPT_DIR}/venv/bin/python3" ]; then
     PYTHON_EXEC="${SCRIPT_DIR}/venv/bin/python3"
 elif [ -f "${USER_HOME}/drone_telemetry/pi/venv/bin/python3" ]; then
@@ -29,7 +29,12 @@ echo "[*] Python Exec:     ${PYTHON_EXEC}"
 echo "[*] Service Target:  ${SERVICE_PATH}"
 echo "--------------------------------------------------------------"
 
-# Generate systemd service file with detected dynamic paths
+# 1. Unmask if previously masked
+echo "[*] Unmasking service if needed..."
+sudo systemctl unmask "${SERVICE_NAME}" 2>/dev/null || true
+sudo rm -f "/etc/systemd/system/${SERVICE_NAME}" 2>/dev/null || true
+
+# 2. Generate systemd service file with dynamic paths
 cat << SERVICE_EOF | sudo tee "${SERVICE_PATH}" > /dev/null
 [Unit]
 Description=Drone Telemetry NRF24 Transmitter Service
@@ -53,7 +58,7 @@ SERVICE_EOF
 
 echo "[+] Service file created at ${SERVICE_PATH}."
 
-# Reload systemd, enable and start service
+# 3. Reload systemd, enable and start service
 echo "[*] Reloading systemd daemon..."
 sudo systemctl daemon-reload
 
