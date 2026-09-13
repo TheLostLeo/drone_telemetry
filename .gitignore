@@ -1,0 +1,22 @@
+# Antigravity State Directory
+.agent/
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Arduino build artifacts
+build/
+*.bin
+*.hex
+*.elf
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+*.log
