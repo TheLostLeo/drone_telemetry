@@ -95,22 +95,19 @@ class SimpleNRF24:
         set_ce(False)
         time.sleep(0.05)
         
-        # Test SPI communication by reading SETUP_AW (default is 0x03 for 5 bytes)
+        # Test SPI communication by reading SETUP_AW
         aw = self.read_reg(REG_SETUP_AW)
-        rf_ch = self.read_reg(REG_RF_CH)
-        print(f"[*] SPI Communication Test: SETUP_AW = 0x{aw:02X}, RF_CH = 0x{rf_ch:02X}")
+        print(f"[*] SPI Communication Test: SETUP_AW = 0x{aw:02X}")
         
         if aw not in (0x01, 0x02, 0x03):
             print("[!] WARNING: SPI read returned unexpected value (0x00 or 0xFF).")
-            print("    Check MISO (Pin 21) and MOSI (Pin 19) wiring.")
             return False
 
-        # Reset registers & flush FIFOs
+        # Reset & flush FIFOs
         self.spi.xfer2([FLUSH_TX])
         self.spi.xfer2([FLUSH_RX])
-        self.write_reg(REG_STATUS, 0x70) # Clear all interrupt flags
+        self.write_reg(REG_STATUS, 0x70)
 
-        # Configure NRF24L01:
         # 1. 5-byte address width
         self.write_reg(REG_SETUP_AW, 0x03)
         # 2. Disable Auto-ACK (Broadcast mode)
@@ -119,32 +116,41 @@ class SimpleNRF24:
         self.write_reg(REG_SETUP_RETR, 0x00)
         # 4. Set Channel (90 = 2.490 GHz)
         self.write_reg(REG_RF_CH, RF_CHANNEL)
-        # 5. Set 250 kbps Data Rate + Maximum Power (0dBm / PA_MAX)
-        # RF_SETUP: Bit 5 = 1 (250kbps), Bit 3 = 0, Bits 2-1 = 11 (0dBm output power) -> 0x26
+        # 5. Set 250 kbps Data Rate + Maximum Power (PA_MAX)
         self.write_reg(REG_RF_SETUP, 0x26)
-        # 6. Set TX Address & Pipe 0 Address
+        # 6. Set Dynamic Payloads
+        self.write_reg(REG_FEATURE, 0x04) # EN_DPL = 1
+        self.write_reg(REG_DYNPD, 0x01)   # Enable DPL on Pipe 0
+        # 7. Set TX Address & Pipe 0 Address
         self.write_reg(REG_TX_ADDR, TX_ADDRESS)
         self.write_reg(REG_RX_ADDR_P0, TX_ADDRESS)
-        # 7. Enable CRC (16-bit) and Power Up in TX mode (PRIM_RX=0, PWR_UP=1, CRCO=1, EN_CRC=1)
-        # CONFIG: 0x0E
+        # 8. Enable CRC (16-bit) and Power Up in TX mode
         self.write_reg(REG_CONFIG, 0x0E)
         
-        time.sleep(0.005) # 5ms crystal startup delay
+        time.sleep(0.01) # Power-up delay
         return True
 
-    def transmit_packet(self, payload: bytes):
+    def transmit_packet(self, payload: bytes) -> bool:
         # Flush TX FIFO
         self.spi.xfer2([FLUSH_TX])
-        # Clear status flags
         self.write_reg(REG_STATUS, 0x70)
         
-        # Load TX Payload
-        self.spi.xfer2([W_TX_PAYLOAD] + list(payload))
+        # Load TX Payload (32-byte standard buffer padded with zeros)
+        full_payload = payload + bytes(32 - len(payload)) if len(payload) < 32 else payload[:32]
+        self.spi.xfer2([W_TX_PAYLOAD] + list(full_payload))
         
-        # Pulse CE high for 15 microseconds to trigger transmission
+        # Pulse CE high for 20 microseconds to trigger TX burst
         set_ce(True)
-        time.sleep(0.0001) # 100 microseconds pulse
+        time.sleep(0.00002) # 20 us pulse
         set_ce(False)
+        
+        # Wait for transmission to complete (~1.2ms for 32 bytes at 250kbps)
+        time.sleep(0.002)
+        
+        status = self.read_reg(REG_STATUS)
+        tx_ok = (status & 0x20) != 0 # TX_DS flag
+        self.write_reg(REG_STATUS, 0x70) # Clear flags
+        return tx_ok
 
 # ======================================================================================
 # PACKET ENCODER
@@ -187,13 +193,9 @@ def main():
     
     if not nrf.init_radio():
         print("\n[!] Radio initialization check failed.")
-        print("    Please double-check that:")
-        print("    1. Red LED on HW-200 base board is ON.")
-        print("    2. SPI is enabled ('ls /dev/spidev*').")
-        print("    3. Wires: VCC->Pin 2, GND->Pin 20/25, CE->Pin 15, CSN->Pin 24, SCK->Pin 23, MOSI->Pin 19, MISO->Pin 21.")
         sys.exit(1)
         
-    print(f"[+] NRF24L01+ successfully configured on Channel {RF_CHANNEL} (250 KBPS, PA_MAX)!")
+    print(f"[+] NRF24L01+ configured on Channel {RF_CHANNEL} (250 KBPS, PA_MAX)!")
     print(f"[+] Target address: {TX_ADDRESS.decode()} (matches ESP32 receiver)")
     print("[+] Broadcasting simulated telemetry stream at 5 Hz. Press Ctrl+C to exit.\n")
     
@@ -226,15 +228,16 @@ def main():
                 sats=satellites
             )
             
-            # Send over SPI
-            nrf.transmit_packet(packet)
+            # Transmit & check TX_DS status
+            tx_sent = nrf.transmit_packet(packet)
+            status_indicator = "✓ TX OK" if tx_sent else "~ SENT"
             
-            print(f"[TX #{seq:04d}] BAT: {battery_v:.2f}V | RSSI: {rssi}% | "
+            print(f"[TX #{seq:04d} | {status_indicator}] BAT: {battery_v:.2f}V | RSSI: {rssi}% | "
                   f"ALT: {altitude:5.1f}m | LAT: {latitude:.6f} | LON: {longitude:.6f} | "
-                  f"SATS: {satellites} | ({len(packet)}B)")
+                  f"SATS: {satellites}")
             
             seq = (seq + 1) % 256
-            time.sleep(0.2)
+            time.sleep(0.2) # 5 Hz
             
     except KeyboardInterrupt:
         print("\n[*] Transmitter stopped.")

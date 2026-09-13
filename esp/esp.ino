@@ -284,15 +284,14 @@ void drawTelemetryScreen() {
 // ARDUINO SETUP
 // ======================================================================================
 void setup() {
-  // 1. Initialize Serial at 115200 baud
   Serial.begin(115200);
-  delay(1000); // 1-second power rail stabilization delay
+  delay(1000);
 
   Serial.println(F("\n\n=============================================="));
   Serial.println(F("    ESP32 Drone Telemetry Receiver Booting    "));
   Serial.println(F("=============================================="));
 
-  // 2. Initialize Hardware I2C and SH1106 OLED
+  // 1. Initialize Hardware I2C and SH1106 OLED
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
   u8g2.begin();
   u8g2.setContrast(255);
@@ -308,13 +307,13 @@ void setup() {
   u8g2.print(F("Initializing..."));
   u8g2.sendBuffer();
 
-  // 3. Initialize VSPI Bus (Do NOT assign SS pin to SPI driver so RF24 controls CSN)
+  // 2. Initialize VSPI Bus
   SPI.begin(PIN_NRF_SCK, PIN_NRF_MISO, PIN_NRF_MOSI, -1);
   pinMode(PIN_NRF_CE, OUTPUT);
   pinMode(PIN_NRF_CSN, OUTPUT);
   digitalWrite(PIN_NRF_CSN, HIGH);
 
-  // 4. Initialize NRF24L01+ Radio
+  // 3. Initialize NRF24L01+ Radio
   if (!radio.begin()) {
     Serial.println(F("[ERROR] NRF24L01 hardware not detected! Check SPI wiring & HW-200 5V power."));
     g_radioHardwareOk = false;
@@ -326,6 +325,7 @@ void setup() {
     radio.setPALevel(RF24_PA_HIGH);
     radio.setCRCLength(RF24_CRC_16);
     radio.setAutoAck(false);
+    radio.enableDynamicPayloads();
 
     radio.openReadingPipe(1, rfAddresses[1]); // "2Node"
     radio.openWritingPipe(rfAddresses[0]);
@@ -350,7 +350,7 @@ void loop() {
     uint8_t rawPayload[32] = {0};
     uint8_t payloadSize = radio.getDynamicPayloadSize();
     if (payloadSize == 0 || payloadSize > 32) {
-      payloadSize = 32;
+      payloadSize = sizeof(TelemetryPacket);
     }
 
     radio.read(&rawPayload, payloadSize);
