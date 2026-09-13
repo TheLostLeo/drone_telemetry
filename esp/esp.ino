@@ -11,14 +11,13 @@
  * 
  * Hardware Pinout Connections:
  *   [NRF24L01+ via HW-200 Adapter -> ESP32 Hardware VSPI]
- *     - VCC  -> 1
+ *     - VCC  -> ESP32 VIN (5V) [Regulated to stable 3.3V by HW-200 AMS1117]
  *     - GND  -> ESP32 GND
  *     - CE   -> GPIO 4
  *     - CSN  -> GPIO 5
  *     - SCK  -> GPIO 18 (VSPI SCK)
  *     - MOSI -> GPIO 23 (VSPI MOSI)
  *     - MISO -> GPIO 19 (VSPI MISO)
- *     - IRQ  -> Not Connected
  * 
  *   [1.3" SH1106 OLED Display -> ESP32 Hardware I2C]
  *     - VCC  -> ESP32 3.3V (or 5V)
@@ -26,10 +25,7 @@
  *     - SCL  -> GPIO 22 (I2C Clock)
  *     - SDA  -> GPIO 21 (I2C Data)
  * 
- * Libraries Required:
- *   - RF24 by TMRh20 (Install via Arduino Library Manager)
- *   - U8g2 by olikraus (Install via Arduino Library Manager)
- *   - Wire and SPI (Built-in ESP32 core)
+ * Serial Monitor Baud Rate: 115200
  * ======================================================================================
  */
 
@@ -53,7 +49,6 @@
 
 // ======================================================================================
 // TELEMETRY PACKET STRUCTURE (20 Bytes Packed Binary Struct)
-// Symmetrical with Raspberry Pi / Pixhawk transmitter
 // ======================================================================================
 #define PACKET_MAGIC 0xAA
 
@@ -80,27 +75,28 @@ RF24 radio(PIN_NRF_CE, PIN_NRF_CSN);
 
 // Radio Configuration
 const byte rfAddresses[][6] = {"1Node", "2Node"};
-const uint8_t RF_CHANNEL = 90; // 2.490 GHz (Clean channel outside standard Wi-Fi)
+const uint8_t RF_CHANNEL = 90; // 2.490 GHz
 
 // ======================================================================================
 // STATE VARIABLES
 // ======================================================================================
-float g_batVoltage = 0.0;    // Volts (e.g. 12.58 V)
-int16_t g_rssiVal = 0;       // % or dBm (e.g. 85)
-float g_altitude = 0.0;      // Meters (e.g. 45.20 m)
-double g_latitude = 0.0;     // Decimal degrees (e.g. 12.345678)
-double g_longitude = 0.0;    // Decimal degrees (e.g. 77.123456)
-uint8_t g_satellites = 0;    // Satellites in view
-uint8_t g_lastSeq = 0;       // Last packet sequence counter
+float g_batVoltage = 0.0;    // Volts
+int16_t g_rssiVal = 0;       // %
+float g_altitude = 0.0;      // Meters
+double g_latitude = 0.0;     // Degrees
+double g_longitude = 0.0;    // Degrees
+uint8_t g_satellites = 0;    // Count
+uint8_t g_lastSeq = 0;       // Sequence
 
 bool g_hasReceivedData = false;
 bool g_heartbeatState = false;
+bool g_radioHardwareOk = false;
 unsigned long g_lastPacketTime = 0;
 const unsigned long DISCONNECT_TIMEOUT_MS = 30000; // 30 seconds
 
 // Display Refresh Timer
 unsigned long g_lastDisplayRefresh = 0;
-const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 50; // 20 FPS refresh
+const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 60; // ~16 FPS
 
 // ======================================================================================
 // CHECKSUM HELPER
@@ -125,7 +121,7 @@ bool processBinaryPacket(const uint8_t* buffer, size_t size) {
   // Validate XOR Checksum over bytes 0 to 18
   uint8_t expectedChecksum = calculateChecksum(buffer, sizeof(TelemetryPacket) - 1);
   if (pkt->checksum != expectedChecksum) {
-    Serial.println(F("[NRF24] Checksum mismatch! Corrupted packet dropped."));
+    Serial.println(F("[NRF24] Corrupted packet dropped (Checksum mismatch)."));
     return false;
   }
 
@@ -141,7 +137,7 @@ bool processBinaryPacket(const uint8_t* buffer, size_t size) {
   return true;
 }
 
-// Fallback CSV Parser (for backward compatibility with string-based transmitters)
+// Fallback CSV Parser
 bool processCsvPacket(const char* text) {
   char temp[33];
   strncpy(temp, text, sizeof(temp));
@@ -169,8 +165,27 @@ bool processCsvPacket(const char* text) {
 // ======================================================================================
 // OLED DRAWING FUNCTIONS
 // ======================================================================================
+void drawHardwareErrorScreen() {
+  u8g2.clearBuffer();
+  u8g2.drawRFrame(0, 0, 128, 64, 3);
+  
+  u8g2.setFont(u8g2_font_6x12_tf);
+  u8g2.drawBox(2, 2, 124, 15);
+  u8g2.setDrawColor(0);
+  u8g2.setCursor(12, 13);
+  u8g2.print(F("! HARDWARE ERROR !"));
+  u8g2.setDrawColor(1);
+  
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.setCursor(14, 34);
+  u8g2.print(F("NRF24 Not Found"));
+  
+  u8g2.setFont(u8g2_font_5x8_tr);
+  u8g2.setCursor(12, 50);
+  u8g2.print(F("Check SPI & 5V Power"));
+  u8g2.sendBuffer();
+}
 
-// Render Disconnect / Loss of Signal Alert Screen
 void drawDisconnectScreen(unsigned long elapsedMs) {
   u8g2.clearBuffer();
 
@@ -180,19 +195,19 @@ void drawDisconnectScreen(unsigned long elapsedMs) {
   // Warning Header Banner
   u8g2.setFont(u8g2_font_6x12_tf);
   u8g2.drawBox(2, 2, 124, 15);
-  u8g2.setDrawColor(0); // Inverted text inside solid box
+  u8g2.setDrawColor(0);
   u8g2.setCursor(14, 13);
   u8g2.print(F("! NO CONNECTION !"));
-  u8g2.setDrawColor(1); // Restore normal draw color
+  u8g2.setDrawColor(1);
 
   // Status Message
   u8g2.setFont(u8g2_font_ncenB08_tr);
-  u8g2.setCursor(12, 34);
+  u8g2.setCursor(16, 34);
   u8g2.print(F("Telemetry Lost"));
 
   // Elapsed Loss Time Counter
   u8g2.setFont(u8g2_font_6x12_tf);
-  u8g2.setCursor(12, 50);
+  u8g2.setCursor(14, 50);
   if (!g_hasReceivedData) {
     u8g2.print(F("Waiting for link..."));
   } else {
@@ -205,59 +220,46 @@ void drawDisconnectScreen(unsigned long elapsedMs) {
   u8g2.sendBuffer();
 }
 
-// Render 3-Level Flight Telemetry UI
 void drawTelemetryScreen() {
   u8g2.clearBuffer();
 
-  // ------------------------------------------------------------------------------------
   // LEVEL 1: Battery Voltage & Satellites / Heartbeat Indicator
-  // ------------------------------------------------------------------------------------
   u8g2.setFont(u8g2_font_7x14B_tr);
   u8g2.setCursor(2, 13);
   u8g2.print(F("BAT:"));
   u8g2.print(g_batVoltage, 2);
   u8g2.print(F("V"));
 
-  // Satellite Count
   u8g2.setFont(u8g2_font_6x12_tf);
   u8g2.setCursor(76, 12);
   u8g2.print(F("SAT:"));
   u8g2.print(g_satellites);
 
-  // Live Heartbeat Dot (blinks on received packet)
+  // Heartbeat Dot
   if (g_heartbeatState) {
     u8g2.drawDisc(122, 9, 3);
   } else {
     u8g2.drawCircle(122, 9, 3);
   }
 
-  // Divider Line 1
   u8g2.drawHLine(0, 16, 128);
 
-  // ------------------------------------------------------------------------------------
   // LEVEL 2: FlySky RSSI & Altitude in Meters
-  // ------------------------------------------------------------------------------------
   u8g2.setFont(u8g2_font_6x12_tf);
-  
-  // Left Column: RSSI
   u8g2.setCursor(2, 29);
   u8g2.print(F("RSSI:"));
   u8g2.print(g_rssiVal);
   u8g2.print(F("%"));
 
-  // Right Column: Altitude
   u8g2.setCursor(68, 29);
   u8g2.print(F("ALT:"));
   u8g2.print(g_altitude, 1);
   u8g2.print(F("m"));
 
-  // Divider Line 2
   u8g2.drawHLine(0, 33, 128);
 
-  // ------------------------------------------------------------------------------------
-  // LEVEL 3: High-Precision GPS Coordinates (Latitude & Longitude)
-  // ------------------------------------------------------------------------------------
-  u8g2.setFont(u8g2_font_5x8_tr); // Crisp 5x8 font for full 6 decimal places
+  // LEVEL 3: High-Precision GPS Coordinates
+  u8g2.setFont(u8g2_font_5x8_tr);
 
   u8g2.setCursor(2, 45);
   u8g2.print(F("LAT: "));
@@ -282,18 +284,20 @@ void drawTelemetryScreen() {
 // ARDUINO SETUP
 // ======================================================================================
 void setup() {
+  // 1. Initialize Serial at 115200 baud
   Serial.begin(115200);
-  delay(200);
-  Serial.println(F("\n=============================================="));
+  delay(1000); // 1-second power rail stabilization delay
+
+  Serial.println(F("\n\n=============================================="));
   Serial.println(F("    ESP32 Drone Telemetry Receiver Booting    "));
   Serial.println(F("=============================================="));
 
-  // 1. Initialize Hardware I2C and SH1106 OLED
+  // 2. Initialize Hardware I2C and SH1106 OLED
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
   u8g2.begin();
-  u8g2.setContrast(255); // Maximum crisp contrast
+  u8g2.setContrast(255);
 
-  // Show Initial Splash Screen
+  // Splash Screen
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_ncenB08_tr);
   u8g2.drawRFrame(0, 0, 128, 64, 4);
@@ -304,44 +308,44 @@ void setup() {
   u8g2.print(F("Initializing..."));
   u8g2.sendBuffer();
 
-  // 2. Initialize Hardware SPI for NRF24L01 on ESP32 VSPI
-  SPI.begin(PIN_NRF_SCK, PIN_NRF_MISO, PIN_NRF_MOSI, PIN_NRF_CSN);
+  // 3. Initialize VSPI Bus (Do NOT assign SS pin to SPI driver so RF24 controls CSN)
+  SPI.begin(PIN_NRF_SCK, PIN_NRF_MISO, PIN_NRF_MOSI, -1);
+  pinMode(PIN_NRF_CE, OUTPUT);
+  pinMode(PIN_NRF_CSN, OUTPUT);
+  digitalWrite(PIN_NRF_CSN, HIGH);
 
-  // 3. Initialize NRF24L01+ Radio
+  // 4. Initialize NRF24L01+ Radio
   if (!radio.begin()) {
-    Serial.println(F("[ERROR] NRF24L01 hardware not detected! Check wiring & HW-200 base."));
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x12_tf);
-    u8g2.setCursor(10, 25);
-    u8g2.print(F("NRF24 HW ERROR!"));
-    u8g2.setCursor(10, 45);
-    u8g2.print(F("Check Radio Wiring"));
-    u8g2.sendBuffer();
-    while (1) {
-      delay(1000);
-    }
+    Serial.println(F("[ERROR] NRF24L01 hardware not detected! Check SPI wiring & HW-200 5V power."));
+    g_radioHardwareOk = false;
+    drawHardwareErrorScreen();
+  } else {
+    g_radioHardwareOk = true;
+    radio.setChannel(RF_CHANNEL);
+    radio.setDataRate(RF24_250KBPS);      // Long range mode (250 kbps)
+    radio.setPALevel(RF24_PA_HIGH);
+    radio.setCRCLength(RF24_CRC_16);
+    radio.setAutoAck(false);
+
+    radio.openReadingPipe(1, rfAddresses[1]); // "2Node"
+    radio.openWritingPipe(rfAddresses[0]);
+    radio.startListening();
+
+    Serial.print(F("[NRF24] Radio initialized successfully on Channel "));
+    Serial.println(RF_CHANNEL);
   }
-
-  // Radio Configuration for Optimal Range & Stability
-  radio.setChannel(RF_CHANNEL);
-  radio.setDataRate(RF24_250KBPS);      // Long range mode (250 kbps gives +3dBm sensitivity)
-  radio.setPALevel(RF24_PA_HIGH);       // High power for receiver
-  radio.setCRCLength(RF24_CRC_16);      // 16-bit hardware CRC check
-  radio.setAutoAck(false);              // Broadcast mode (matches drone transmitter)
-
-  // Configure Listening Pipe
-  radio.openReadingPipe(1, rfAddresses[1]); // Listen on pipe 1 ("2Node")
-  radio.openWritingPipe(rfAddresses[0]);
-  radio.startListening();
-
-  Serial.printf("[NRF24] Radio initialized successfully on Channel %d (250KBPS)\n", RF_CHANNEL);
 }
 
 // ======================================================================================
 // MAIN ARDUINO LOOP
 // ======================================================================================
 void loop() {
-  // 1. Check for incoming NRF24 packets (Non-blocking FIFO read)
+  if (!g_radioHardwareOk) {
+    delay(500);
+    return;
+  }
+
+  // 1. Non-blocking Radio Packet Polling
   while (radio.available()) {
     uint8_t rawPayload[32] = {0};
     uint8_t payloadSize = radio.getDynamicPayloadSize();
@@ -353,31 +357,38 @@ void loop() {
 
     bool packetDecoded = false;
 
-    // Check if packet matches 20-byte binary struct (Magic byte 0xAA)
     if (rawPayload[0] == PACKET_MAGIC) {
       packetDecoded = processBinaryPacket(rawPayload, payloadSize);
     } else {
-      // Fallback: Attempt legacy CSV string parsing
       packetDecoded = processCsvPacket((const char*)rawPayload);
     }
 
     if (packetDecoded) {
       g_hasReceivedData = true;
       g_lastPacketTime = millis();
-      g_heartbeatState = !g_heartbeatState; // Toggle heartbeat dot
+      g_heartbeatState = !g_heartbeatState;
 
-      // Debug output over Serial Monitor
-      Serial.printf("[RX] BAT: %.2fV | RSSI: %d | ALT: %.1fm | LAT: %.6f | LON: %.6f | SATS: %d\n",
-                    g_batVoltage, g_rssiVal, g_altitude, g_latitude, g_longitude, g_satellites);
+      // Safe serial printing
+      Serial.print(F("[RX] BAT: "));
+      Serial.print(g_batVoltage, 2);
+      Serial.print(F("V | RSSI: "));
+      Serial.print(g_rssiVal);
+      Serial.print(F("% | ALT: "));
+      Serial.print(g_altitude, 1);
+      Serial.print(F("m | LAT: "));
+      Serial.print(g_latitude, 6);
+      Serial.print(F(" | LON: "));
+      Serial.print(g_longitude, 6);
+      Serial.print(F(" | SATS: "));
+      Serial.println(g_satellites);
     }
   }
 
-  // 2. Refresh OLED Display at 20 FPS (Non-blocking)
+  // 2. Non-blocking OLED Screen Refresh
   unsigned long currentMillis = millis();
   if (currentMillis - g_lastDisplayRefresh >= DISPLAY_REFRESH_INTERVAL_MS) {
     g_lastDisplayRefresh = currentMillis;
 
-    // Check 30-second disconnect timeout
     unsigned long timeSinceLastPacket = currentMillis - g_lastPacketTime;
     if (!g_hasReceivedData || timeSinceLastPacket >= DISCONNECT_TIMEOUT_MS) {
       drawDisconnectScreen(timeSinceLastPacket);
