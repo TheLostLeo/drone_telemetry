@@ -6,11 +6,9 @@ File: pi/modules/mavlink_manager.py
 
 Description:
   Singleton MAVLink reader that exclusively connects to Pixhawk 2.4.8 on TELEM2
-  (/dev/serial0 @ 115200 baud). Ingests all 11 categories of telemetry, computes
-  derived metrics (PID error, cell delta, heading), and provides a thread-safe
-  snapshot for WebSockets, Grafana, and Radio TX.
-  
-  Includes a built-in realistic dynamic flight simulator for testing without hardware.
+  (/dev/serial0 @ 115200 baud) or USB (/dev/ttyACM0). Ingests all 11 categories
+  of real live flight telemetry, computes derived metrics (PID error, cell delta,
+  heading), and provides a thread-safe snapshot for WebSockets and Radio TX.
 ======================================================================================
 """
 
@@ -26,69 +24,70 @@ class MAVLinkManager:
         self.simulate = simulate
         self.running = False
         self.thread = None
+        self.mav = None
         self._lock = threading.Lock()
 
         # Telemetry State Store (All 11 Categories)
         self.state: Dict[str, Any] = {
             # 1. Total Battery & Power
-            "battery_voltage": 0.0,      # Volts (e.g. 12.45V)
-            "battery_current": 0.0,      # Amps (e.g. 14.2A)
-            "battery_remaining": 0,      # % (0-100)
+            "battery_voltage": 0.0,
+            "battery_current": 0.0,
+            "battery_remaining": 0,
             
             # 2. Individual Cell Voltages (Cell 1 to 6)
-            "cell_voltages": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], # Volts per cell
-            "cell_delta_mv": 0,          # Difference between max and min cell in mV
+            "cell_voltages": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "cell_delta_mv": 0,
             
             # 3. Altitude & Vertical Dynamics
-            "altitude_relative": 0.0,    # Meters AGL
-            "altitude_msl": 0.0,         # Meters MSL
-            "climb_rate": 0.0,           # m/s
+            "altitude_relative": 0.0,
+            "altitude_msl": 0.0,
+            "climb_rate": 0.0,
             
             # 4. GPS & Positioning
-            "latitude": 0.0,             # Degrees
-            "longitude": 0.0,            # Degrees
-            "satellites": 0,             # Satellite count
-            "gps_fix_type": "NO FIX",    # NO FIX / 2D / 3D / DGPS / RTK
-            "hdop": 99.9,                # Horizontal Dilution of Precision
+            "latitude": 0.0,
+            "longitude": 0.0,
+            "satellites": 0,
+            "gps_fix_type": "NO FIX",
+            "hdop": 99.9,
             
             # 5. Signal Strength & Telemetry Link
-            "rc_rssi": 0,                # % (0-100)
-            "radio_link_quality": 0,     # %
+            "rc_rssi": 0,
+            "radio_link_quality": 0,
             
             # 6. Heading & Compass
-            "heading": 0.0,              # Degrees (0-360)
+            "heading": 0.0,
             "compass_status": "CALIBRATED",
             
             # 7. Flight Status & Mission State
-            "armed": False,              # True / False
-            "flight_mode": "DISCONNECTED",# STABILIZE / LOITER / GUIDED / AUTO / RTL
-            "system_status": "STANDBY",  # BOOT / STANDBY / ACTIVE / EMERGENCY
-            "mission_state": "STANDBY",  # STANDBY / EN ROUTE / SEARCHING / RTL
-            "mission_progress_percent": 0,# 0-100%
+            "armed": False,
+            "flight_mode": "DISCONNECTED",
+            "system_status": "STANDBY",
+            "mission_state": "STANDBY",
+            "mission_progress_percent": 0,
             
             # 8. 3-Axis Gyroscope & Accelerometer Rates
-            "gyro_x": 0.0,               # deg/s (Roll Rate)
-            "gyro_y": 0.0,               # deg/s (Pitch Rate)
-            "gyro_z": 0.0,               # deg/s (Yaw Rate)
-            "accel_x": 0.0,              # m/s^2 or g
-            "accel_y": 0.0,              # m/s^2 or g
-            "accel_z": 9.81,             # m/s^2 or g
+            "gyro_x": 0.0,
+            "gyro_y": 0.0,
+            "gyro_z": 0.0,
+            "accel_x": 0.0,
+            "accel_y": 0.0,
+            "accel_z": 9.81,
             
             # 9. PID Attitude Tracking & Errors
-            "attitude_roll": 0.0,        # Degrees
-            "attitude_pitch": 0.0,       # Degrees
-            "attitude_yaw": 0.0,         # Degrees
-            "target_roll": 0.0,          # Degrees
-            "target_pitch": 0.0,         # Degrees
-            "target_yaw": 0.0,           # Degrees
-            "error_roll": 0.0,           # Degrees
-            "error_pitch": 0.0,          # Degrees
+            "attitude_roll": 0.0,
+            "attitude_pitch": 0.0,
+            "attitude_yaw": 0.0,
+            "target_roll": 0.0,
+            "target_pitch": 0.0,
+            "target_yaw": 0.0,
+            "error_roll": 0.0,
+            "error_pitch": 0.0,
             
             # 10. Motor Power Outputs (Motors 1 to 4)
-            "motor_pwm": [1000, 1000, 1000, 1000],  # Microseconds (1000 - 2000)
-            "motor_percent": [0, 0, 0, 0],          # % (0 - 100)
+            "motor_pwm": [1000, 1000, 1000, 1000],
+            "motor_percent": [0, 0, 0, 0],
             
-            # Timing
+            # Timing & Status
             "last_packet_timestamp": 0.0,
             "connected": False
         }
@@ -106,6 +105,11 @@ class MAVLinkManager:
         self.running = False
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=1.0)
+        if self.mav:
+            try:
+                self.mav.close()
+            except Exception:
+                pass
 
     def get_telemetry_snapshot(self) -> Dict[str, Any]:
         """Thread-safe copy of latest telemetry."""
@@ -122,40 +126,51 @@ class MAVLinkManager:
         try:
             from pymavlink import mavutil
         except ImportError:
-            print("[!] 'pymavlink' is not installed. Falling back to dynamic simulation mode.")
-            self._run_simulation()
+            print("[!] ERROR: 'pymavlink' is not installed on system. Run: pip install pymavlink")
             return
 
-        ports_to_try = [self.port, "/dev/serial0", "/dev/ttyAMA0", "/dev/ttyACM0", "/dev/ttyUSB0"]
-        mav = None
+        ports_to_try = [self.port, "/dev/ttyACM0", "/dev/serial0", "/dev/ttyAMA0", "/dev/ttyUSB0"]
 
         while self.running:
+            mav_conn = None
             for p in ports_to_try:
                 try:
-                    mav = mavutil.mavlink_connection(p, baud=self.baud)
-                    print(f"[+] MAVLink connected on serial port '{p}' at {self.baud} baud.")
+                    mav_conn = mavutil.mavlink_connection(p, baud=self.baud)
+                    print(f"[+] Opened serial port '{p}' at {self.baud} baud.")
                     break
                 except Exception:
                     continue
 
-            if not mav:
-                print(f"[!] Warning: Could not connect to any serial port. Retrying in 3s...")
-                time.sleep(3.0)
+            if not mav_conn:
+                print(f"[!] Waiting for Pixhawk serial connection ({self.port}). Retrying in 2s...")
+                time.sleep(2.0)
                 continue
 
+            self.mav = mav_conn
+
+            print("[*] Waiting for MAVLink Heartbeat from Pixhawk...")
             try:
-                # Request all streams at 10 Hz
-                mav.mav.request_data_stream_send(
-                    mav.target_system, mav.target_component,
+                hb = self.mav.wait_heartbeat(timeout=5)
+                if hb:
+                    print(f"[✓] Heartbeat received from Pixhawk (System: {self.mav.target_system}, Component: {self.mav.target_component})")
+                    with self._lock:
+                        self.state["connected"] = True
+            except Exception:
+                pass
+
+            # Request live stream rates at 10 Hz
+            try:
+                self.mav.mav.request_data_stream_send(
+                    self.mav.target_system, self.mav.target_component,
                     mavutil.mavlink.MAV_DATA_STREAM_ALL, 10, 1
                 )
             except Exception:
                 pass
 
-            # Ingestion loop
+            # Live Ingestion Loop
             while self.running:
                 try:
-                    msg = mav.recv_match(blocking=True, timeout=1.0)
+                    msg = self.mav.recv_match(blocking=True, timeout=1.0)
                     if not msg:
                         continue
                     
@@ -169,9 +184,8 @@ class MAVLinkManager:
                         # 1. HEARTBEAT
                         if msg_type == 'HEARTBEAT':
                             self.state["armed"] = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
-                            # Map ArduPilot flight modes
                             try:
-                                mode_map = mav.mode_mapping()
+                                mode_map = self.mav.mode_mapping()
                                 inv_map = {v: k for k, v in mode_map.items()}
                                 self.state["flight_mode"] = inv_map.get(msg.custom_mode, f"MODE_{msg.custom_mode}")
                             except Exception:
@@ -247,10 +261,8 @@ class MAVLinkManager:
 
                         # 8. ATTITUDE_TARGET
                         elif msg_type == 'ATTITUDE_TARGET':
-                            # Extract Euler from target if available
                             try:
                                 q = msg.q
-                                # Approximate Roll/Pitch target from quaternion
                                 sinr_cosp = 2 * (q[0] * q[1] + q[2] * q[3])
                                 cosr_cosp = 1 - 2 * (q[1] * q[1] + q[2] * q[2])
                                 self.state["target_roll"] = round(math.degrees(math.atan2(sinr_cosp, cosr_cosp)), 2)
@@ -264,7 +276,6 @@ class MAVLinkManager:
 
                         # 9. RAW_IMU / SCALED_IMU
                         elif msg_type in ('RAW_IMU', 'SCALED_IMU2'):
-                            # Accelerometer (scaled to m/s^2)
                             self.state["accel_x"] = round((msg.xacc / 1000.0) * 9.81, 2)
                             self.state["accel_y"] = round((msg.yacc / 1000.0) * 9.81, 2)
                             self.state["accel_z"] = round((msg.zacc / 1000.0) * 9.81, 2)
@@ -285,28 +296,27 @@ class MAVLinkManager:
                                 self.state["rc_rssi"] = 90
 
                 except Exception as e:
-                    print(f"[!] MAVLink decode error: {e}")
+                    print(f"[!] MAVLink read error: {e}")
                     time.sleep(0.1)
+                    break
 
     def _run_simulation(self):
-        """Simulates a realistic live multi-rotor flight for testing."""
+        """Dynamic simulation loop only used when --simulate flag is explicitly set."""
         print("[+] Starting high-fidelity telemetry simulator (10 Hz)...")
         t = 0.0
         base_lat = 12.971598
         base_lon = 77.594562
-        base_voltage = 12.58 # 3S LIPO
+        base_voltage = 12.58
 
         while self.running:
-            time.sleep(0.1) # 10 Hz
+            time.sleep(0.1)
             t += 0.1
 
-            # Simulated flight pattern: Takeoff -> Guided Search -> Cruising
             sim_alt = round(max(0.0, 15.0 + 3.0 * math.sin(t * 0.2)), 1)
             sim_lat = round(base_lat + 0.0004 * math.sin(t * 0.1), 7)
             sim_lon = round(base_lon + 0.0004 * math.cos(t * 0.1), 7)
             sim_heading = round((t * 12.0) % 360, 1)
 
-            # Simulated 3-axis gyro rates and attitude
             roll_target = round(3.5 * math.sin(t * 0.8), 2)
             pitch_target = round(2.0 * math.cos(t * 0.5), 2)
             roll_actual = round(roll_target + 0.3 * math.sin(t * 3.0), 2)
@@ -320,14 +330,12 @@ class MAVLinkManager:
             accel_y = round(0.3 * math.cos(t * 1.2), 2)
             accel_z = round(9.81 + 0.5 * math.sin(t * 2.0), 2)
 
-            # Simulated battery discharge & individual cell voltages (3S LIPO)
             sim_voltage = max(10.8, round(base_voltage - (t * 0.002), 2))
             c1 = round((sim_voltage / 3.0) + 0.012, 3)
             c2 = round((sim_voltage / 3.0) - 0.008, 3)
             c3 = round((sim_voltage / 3.0) + 0.002, 3)
             cell_delta = int((max(c1, c2, c3) - min(c1, c2, c3)) * 1000)
 
-            # Motor PWM equalizer outputs
             base_pwm = 1580
             m1 = int(base_pwm + 45 * math.sin(t * 2.0))
             m2 = int(base_pwm - 35 * math.sin(t * 2.0))
@@ -376,10 +384,3 @@ class MAVLinkManager:
                     "last_packet_timestamp": time.time(),
                     "connected": True
                 })
-
-if __name__ == "__main__":
-    mgr = MAVLinkManager(simulate=True)
-    mgr.start()
-    time.sleep(1.0)
-    print("Snapshot:", mgr.get_telemetry_snapshot())
-    mgr.stop()
