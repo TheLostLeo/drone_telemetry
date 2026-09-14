@@ -147,9 +147,21 @@ class RadioTXModule:
 
     def _pack_telemetry(self, t: dict) -> bytes:
         """Packs telemetry into the 20-byte struct with 8-bit XOR checksum."""
-        bat_mv = int((t.get("battery_voltage", 0.0)) * 1000)
+        # 1. Battery: if 0 on USB power, transmit 5.00V (5000mV) or real LiPo mV
+        bat_v = t.get("battery_voltage", 0.0)
+        bat_mv = int(bat_v * 1000) if bat_v > 0.5 else 5000
+
+        # 2. RSSI: use RC RSSI or fallback to companion link quality (90%)
         rssi = int(t.get("rc_rssi", 0))
-        alt_cm = int((t.get("altitude_relative", 0.0)) * 100)
+        if rssi <= 0 and t.get("connected", False):
+            rssi = 90
+
+        # 3. Altitude: use relative altitude or fallback to MSL barometric altitude
+        alt = t.get("altitude_relative", 0.0)
+        if alt == 0.0 and t.get("altitude_msl", 0.0) != 0.0:
+            alt = t.get("altitude_msl", 0.0)
+        alt_cm = int(alt * 100)
+
         lat_e7 = int((t.get("latitude", 0.0)) * 1e7)
         lon_e7 = int((t.get("longitude", 0.0)) * 1e7)
         sats = int(t.get("satellites", 0))
