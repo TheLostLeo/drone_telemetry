@@ -299,148 +299,151 @@ class MAVLinkManager:
 
                         msg_type = msg.get_type()
 
-                        with self._lock:
-                            self.state["last_packet_timestamp"] = now
-                            self.state["connected"] = True
+                        try:
+                            with self._lock:
+                                self.state["last_packet_timestamp"] = now
+                                self.state["connected"] = True
 
-                            # 1. HEARTBEAT
-                            if msg_type == 'HEARTBEAT':
-                                self.state["armed"] = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
-                                try:
-                                    mode_map = self.mav.mode_mapping()
-                                    inv_map = {v: k for k, v in mode_map.items()}
-                                    self.state["flight_mode"] = inv_map.get(msg.custom_mode, f"MODE_{msg.custom_mode}")
-                                except Exception:
-                                    self.state["flight_mode"] = f"MODE_{msg.custom_mode}"
-                                
-                                sys_status_map = {
-                                    0: "UNINIT", 1: "BOOT", 2: "CALIBRATING", 3: "STANDBY",
-                                    4: "ACTIVE", 5: "CRITICAL", 6: "EMERGENCY"
-                                }
-                                self.state["system_status"] = sys_status_map.get(msg.system_status, "ACTIVE")
+                                # 1. HEARTBEAT
+                                if msg_type == 'HEARTBEAT':
+                                    self.state["armed"] = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                                    try:
+                                        mode_map = self.mav.mode_mapping()
+                                        inv_map = {v: k for k, v in mode_map.items()}
+                                        self.state["flight_mode"] = inv_map.get(msg.custom_mode, f"MODE_{msg.custom_mode}")
+                                    except Exception:
+                                        self.state["flight_mode"] = f"MODE_{msg.custom_mode}"
+                                    
+                                    sys_status_map = {
+                                        0: "UNINIT", 1: "BOOT", 2: "CALIBRATING", 3: "STANDBY",
+                                        4: "ACTIVE", 5: "CRITICAL", 6: "EMERGENCY"
+                                    }
+                                    self.state["system_status"] = sys_status_map.get(msg.system_status, "ACTIVE")
 
-                            # 2. SYS_STATUS
-                            elif msg_type == 'SYS_STATUS':
-                                if msg.voltage_battery > 0:
-                                    self.state["battery_voltage"] = round(msg.voltage_battery / 1000.0, 2)
-                                if msg.current_battery >= 0:
-                                    self.state["battery_current"] = round(msg.current_battery / 100.0, 1)
-                                if 0 <= msg.battery_remaining <= 100:
-                                    self.state["battery_remaining"] = msg.battery_remaining
+                                # 2. SYS_STATUS
+                                elif msg_type == 'SYS_STATUS':
+                                    if msg.voltage_battery > 0:
+                                        self.state["battery_voltage"] = round(msg.voltage_battery / 1000.0, 2)
+                                    if msg.current_battery >= 0:
+                                        self.state["battery_current"] = round(msg.current_battery / 100.0, 1)
+                                    if 0 <= msg.battery_remaining <= 100:
+                                        self.state["battery_remaining"] = msg.battery_remaining
 
-                            # 3. BATTERY_STATUS
-                            elif msg_type == 'BATTERY_STATUS':
-                                if len(msg.voltages) > 0:
-                                    valid_cells = []
-                                    for v in msg.voltages[:6]:
-                                        if v not in (0, 65535):
-                                            cell_v = round(v / 1000.0, 3)
-                                            valid_cells.append(cell_v)
+                                # 3. BATTERY_STATUS
+                                elif msg_type == 'BATTERY_STATUS':
+                                    if len(msg.voltages) > 0:
+                                        valid_cells = []
+                                        for v in msg.voltages[:6]:
+                                            if v not in (0, 65535):
+                                                cell_v = round(v / 1000.0, 3)
+                                                valid_cells.append(cell_v)
+                                            else:
+                                                valid_cells.append(0.0)
+                                        self.state["cell_voltages"] = valid_cells
+                                        active_cells = [c for c in valid_cells if c > 1.0]
+                                        if active_cells:
+                                            delta = int((max(active_cells) - min(active_cells)) * 1000)
+                                            self.state["cell_delta_mv"] = max(0, delta)
+                                    if msg.current_battery >= 0:
+                                        self.state["battery_current"] = round(msg.current_battery / 100.0, 1)
+                                    if 0 <= msg.battery_remaining <= 100:
+                                        self.state["battery_remaining"] = msg.battery_remaining
+
+                                # 4. GLOBAL_POSITION_INT
+                                elif msg_type == 'GLOBAL_POSITION_INT':
+                                    self.state["latitude"] = round(msg.lat / 1e7, 7)
+                                    self.state["longitude"] = round(msg.lon / 1e7, 7)
+                                    self.state["altitude_relative"] = round(msg.relative_alt / 1000.0, 1)
+                                    self.state["altitude_msl"] = round(msg.alt / 1000.0, 1)
+                                    if msg.hdg != 65535 and msg.hdg != 0:
+                                        self.state["heading"] = round(msg.hdg / 100.0, 1)
+
+                                # 5. GPS_RAW_INT
+                                elif msg_type == 'GPS_RAW_INT':
+                                    self.state["satellites"] = msg.satellites_visible
+                                    fix_map = {0: "NO FIX", 1: "NO FIX", 2: "2D FIX", 3: "3D FIX", 4: "DGPS", 5: "RTK FLT", 6: "RTK FIX"}
+                                    self.state["gps_fix_type"] = fix_map.get(msg.fix_type, "NO FIX" if msg.fix_type == 0 else "3D FIX")
+                                    self.state["hdop"] = round(msg.eph / 100.0, 2)
+
+                                # 6. VFR_HUD
+                                elif msg_type == 'VFR_HUD':
+                                    self.state["climb_rate"] = round(msg.climb, 2)
+                                    if msg.heading != 0:
+                                        self.state["heading"] = round(msg.heading, 1)
+                                    if hasattr(msg, 'alt') and msg.alt is not None:
+                                        self.state["altitude_msl"] = round(msg.alt, 1)
+                                        if self.state["altitude_relative"] == 0.0:
+                                            self.state["altitude_relative"] = round(msg.alt, 1)
+
+                                # 7. ATTITUDE & AHRS (Euler Angles & Angular Rates)
+                                elif msg_type in ('ATTITUDE', 'AHRS2', 'AHRS3'):
+                                    if hasattr(msg, 'roll'):
+                                        self.state["attitude_roll"] = round(math.degrees(msg.roll), 2)
+                                        self.state["attitude_pitch"] = round(math.degrees(msg.pitch), 2)
+                                        self.state["attitude_yaw"] = round(math.degrees(msg.yaw) % 360, 2)
+                                    if hasattr(msg, 'rollspeed'):
+                                        self.state["gyro_x"] = round(math.degrees(msg.rollspeed), 2)
+                                        self.state["gyro_y"] = round(math.degrees(msg.pitchspeed), 2)
+                                        self.state["gyro_z"] = round(math.degrees(msg.yawspeed), 2)
+                                    if self.state["heading"] == 0 and "attitude_yaw" in self.state:
+                                        self.state["heading"] = self.state["attitude_yaw"]
+                                    self.state["error_roll"] = round(self.state["target_roll"] - self.state["attitude_roll"], 2)
+                                    self.state["error_pitch"] = round(self.state["target_pitch"] - self.state["attitude_pitch"], 2)
+
+                                # 8. ATTITUDE_TARGET & NAV_CONTROLLER_OUTPUT
+                                elif msg_type == 'ATTITUDE_TARGET':
+                                    try:
+                                        q = msg.q
+                                        sinr_cosp = 2 * (q[0] * q[1] + q[2] * q[3])
+                                        cosr_cosp = 1 - 2 * (q[1] * q[1] + q[2] * q[2])
+                                        self.state["target_roll"] = round(math.degrees(math.atan2(sinr_cosp, cosr_cosp)), 2)
+                                        sinp = 2 * (q[0] * q[2] - q[3] * q[1])
+                                        if abs(sinp) >= 1:
+                                            self.state["target_pitch"] = round(math.copysign(90, sinp), 2)
                                         else:
-                                            valid_cells.append(0.0)
-                                    self.state["cell_voltages"] = valid_cells
-                                    active_cells = [c for c in valid_cells if c > 1.0]
-                                    if active_cells:
-                                        delta = int((max(active_cells) - min(active_cells)) * 1000)
-                                        self.state["cell_delta_mv"] = max(0, delta)
-                                if msg.current_battery >= 0:
-                                    self.state["battery_current"] = round(msg.current_battery / 100.0, 1)
-                                if 0 <= msg.battery_remaining <= 100:
-                                    self.state["battery_remaining"] = msg.battery_remaining
+                                            self.state["target_pitch"] = round(math.degrees(math.asin(sinp)), 2)
+                                    except Exception:
+                                        pass
+                                elif msg_type == 'NAV_CONTROLLER_OUTPUT':
+                                    self.state["target_roll"] = round(msg.nav_roll, 2)
+                                    self.state["target_pitch"] = round(msg.nav_pitch, 2)
+                                    self.state["target_yaw"] = round(msg.target_bearing, 2)
+                                    self.state["error_roll"] = round(msg.nav_roll - self.state["attitude_roll"], 2)
+                                    self.state["error_pitch"] = round(msg.nav_pitch - self.state["attitude_pitch"], 2)
 
-                            # 4. GLOBAL_POSITION_INT
-                            elif msg_type == 'GLOBAL_POSITION_INT':
-                                self.state["latitude"] = round(msg.lat / 1e7, 7)
-                                self.state["longitude"] = round(msg.lon / 1e7, 7)
-                                self.state["altitude_relative"] = round(msg.relative_alt / 1000.0, 1)
-                                self.state["altitude_msl"] = round(msg.alt / 1000.0, 1)
-                                if msg.hdg != 65535 and msg.hdg != 0:
-                                    self.state["heading"] = round(msg.hdg / 100.0, 1)
+                                # 9. HIGHRES_IMU / RAW_IMU / SCALED_IMU
+                                elif msg_type == 'HIGHRES_IMU':
+                                    self.state["accel_x"] = round(msg.xacc, 2)
+                                    self.state["accel_y"] = round(msg.yacc, 2)
+                                    self.state["accel_z"] = round(msg.zacc, 2)
+                                    self.state["gyro_x"] = round(math.degrees(msg.xgyro), 2)
+                                    self.state["gyro_y"] = round(math.degrees(msg.ygyro), 2)
+                                    self.state["gyro_z"] = round(math.degrees(msg.zgyro), 2)
+                                elif msg_type in ('RAW_IMU', 'SCALED_IMU', 'SCALED_IMU2', 'SCALED_IMU3'):
+                                    self.state["accel_x"] = round((msg.xacc / 1000.0) * 9.81, 2)
+                                    self.state["accel_y"] = round((msg.yacc / 1000.0) * 9.81, 2)
+                                    self.state["accel_z"] = round((msg.zacc / 1000.0) * 9.81, 2)
+                                    if hasattr(msg, 'xgyro') and self.state["gyro_x"] == 0:
+                                        self.state["gyro_x"] = round(math.degrees(msg.xgyro / 1000.0), 2)
+                                        self.state["gyro_y"] = round(math.degrees(msg.ygyro / 1000.0), 2)
+                                        self.state["gyro_z"] = round(math.degrees(msg.zgyro / 1000.0), 2)
 
-                            # 5. GPS_RAW_INT
-                            elif msg_type == 'GPS_RAW_INT':
-                                self.state["satellites"] = msg.satellites_visible
-                                fix_map = {0: "NO FIX", 1: "NO FIX", 2: "2D FIX", 3: "3D FIX", 4: "DGPS", 5: "RTK FLT", 6: "RTK FIX"}
-                                self.state["gps_fix_type"] = fix_map.get(msg.fix_type, "NO FIX" if msg.fix_type == 0 else "3D FIX")
-                                self.state["hdop"] = round(msg.eph / 100.0, 2)
+                                # 10. SERVO_OUTPUT_RAW (Motor PWMs 1-4)
+                                elif msg_type == 'SERVO_OUTPUT_RAW':
+                                    pwms = [msg.servo1_raw, msg.servo2_raw, msg.servo3_raw, msg.servo4_raw]
+                                    self.state["motor_pwm"] = pwms
+                                    self.state["motor_percent"] = [
+                                        max(0, min(100, int((p - 1000) / 10.0))) for p in pwms
+                                    ]
 
-                            # 6. VFR_HUD
-                            elif msg_type == 'VFR_HUD':
-                                self.state["climb_rate"] = round(msg.climb, 2)
-                                if msg.heading != 0:
-                                    self.state["heading"] = round(msg.heading, 1)
-                                if hasattr(msg, 'alt') and msg.alt is not None:
-                                    self.state["altitude_msl"] = round(msg.alt, 1)
-                                    if self.state["altitude_relative"] == 0.0:
-                                        self.state["altitude_relative"] = round(msg.alt, 1)
-
-                            # 7. ATTITUDE & AHRS (Euler Angles & Angular Rates)
-                            elif msg_type in ('ATTITUDE', 'AHRS2', 'AHRS3'):
-                                if hasattr(msg, 'roll'):
-                                    self.state["attitude_roll"] = round(math.degrees(msg.roll), 2)
-                                    self.state["attitude_pitch"] = round(math.degrees(msg.pitch), 2)
-                                    self.state["attitude_yaw"] = round(math.degrees(msg.yaw) % 360, 2)
-                                if hasattr(msg, 'rollspeed'):
-                                    self.state["gyro_x"] = round(math.degrees(msg.rollspeed), 2)
-                                    self.state["gyro_y"] = round(math.degrees(msg.pitchspeed), 2)
-                                    self.state["gyro_z"] = round(math.degrees(msg.yawspeed), 2)
-                                if self.state["heading"] == 0 and "attitude_yaw" in self.state:
-                                    self.state["heading"] = self.state["attitude_yaw"]
-                                self.state["error_roll"] = round(self.state["target_roll"] - self.state["attitude_roll"], 2)
-                                self.state["error_pitch"] = round(self.state["target_pitch"] - self.state["attitude_pitch"], 2)
-
-                            # 8. ATTITUDE_TARGET & NAV_CONTROLLER_OUTPUT
-                            elif msg_type == 'ATTITUDE_TARGET':
-                                try:
-                                    q = msg.q
-                                    sinr_cosp = 2 * (q[0] * q[1] + q[2] * q[3])
-                                    cosr_cosp = 1 - 2 * (q[1] * q[1] + q[2] * q[2])
-                                    self.state["target_roll"] = round(math.degrees(math.atan2(sinr_cosp, cosr_cosp)), 2)
-                                    sinp = 2 * (q[0] * q[2] - q[3] * q[1])
-                                    if abs(sinp) >= 1:
-                                        self.state["target_pitch"] = round(math.copysign(90, sinp), 2)
+                                # 11. RC_CHANNELS
+                                elif msg_type == 'RC_CHANNELS':
+                                    if msg.rssi > 0:
+                                        self.state["rc_rssi"] = int((msg.rssi / 255.0) * 100)
                                     else:
-                                        self.state["target_pitch"] = round(math.degrees(math.asin(sinp)), 2)
-                                except Exception:
-                                    pass
-                            elif msg_type == 'NAV_CONTROLLER_OUTPUT':
-                                self.state["target_roll"] = round(msg.nav_roll, 2)
-                                self.state["target_pitch"] = round(msg.nav_pitch, 2)
-                                self.state["target_yaw"] = round(msg.target_bearing, 2)
-                                self.state["error_roll"] = round(msg.nav_roll - self.state["attitude_roll"], 2)
-                                self.state["error_pitch"] = round(msg.nav_pitch - self.state["attitude_pitch"], 2)
-
-                            # 9. HIGHRES_IMU / RAW_IMU / SCALED_IMU
-                            elif msg_type == 'HIGHRES_IMU':
-                                self.state["accel_x"] = round(msg.xacc, 2)
-                                self.state["accel_y"] = round(msg.yacc, 2)
-                                self.state["accel_z"] = round(msg.zacc, 2)
-                                self.state["gyro_x"] = round(math.degrees(msg.xgyro), 2)
-                                self.state["gyro_y"] = round(math.degrees(msg.ygyro), 2)
-                                self.state["gyro_z"] = round(math.degrees(msg.zgyro), 2)
-                            elif msg_type in ('RAW_IMU', 'SCALED_IMU', 'SCALED_IMU2', 'SCALED_IMU3'):
-                                self.state["accel_x"] = round((msg.xacc / 1000.0) * 9.81, 2)
-                                self.state["accel_y"] = round((msg.yacc / 1000.0) * 9.81, 2)
-                                self.state["accel_z"] = round((msg.zacc / 1000.0) * 9.81, 2)
-                                if hasattr(msg, 'xgyro') and self.state["gyro_x"] == 0:
-                                    self.state["gyro_x"] = round(math.degrees(msg.xgyro / 1000.0), 2)
-                                    self.state["gyro_y"] = round(math.degrees(msg.ygyro / 1000.0), 2)
-                                    self.state["gyro_z"] = round(math.degrees(msg.zgyro / 1000.0), 2)
-
-                            # 10. SERVO_OUTPUT_RAW (Motor PWMs 1-4)
-                            elif msg_type == 'SERVO_OUTPUT_RAW':
-                                pwms = [msg.servo1_raw, msg.servo2_raw, msg.servo3_raw, msg.servo4_raw]
-                                self.state["motor_pwm"] = pwms
-                                self.state["motor_percent"] = [
-                                    max(0, min(100, int((p - 1000) / 10.0))) for p in pwms
-                                ]
-
-                            # 11. RC_CHANNELS
-                            elif msg_type == 'RC_CHANNELS':
-                                if msg.rssi > 0:
-                                    self.state["rc_rssi"] = int((msg.rssi / 255.0) * 100)
-                                else:
-                                    self.state["rc_rssi"] = 90
+                                        self.state["rc_rssi"] = 90
+                        except Exception:
+                            pass
 
                     time.sleep(0.005) # Yield CPU
 
