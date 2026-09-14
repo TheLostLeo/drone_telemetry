@@ -97,9 +97,24 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    # Supervisor keep-alive
+    # Supervisor keep-alive & live console status ticker (every 2s)
+    last_print = 0
     while True:
-        time.sleep(1.0)
+        time.sleep(0.5)
+        now = time.time()
+        if now - last_print >= 2.0:
+            last_print = now
+            t = mav_manager.get_telemetry_snapshot()
+            sbc = sbc_monitor.get_metrics_snapshot()
+            conn_status = "✓ LIVE" if t.get("connected") else "! WAITING"
+            print(f"[{conn_status}] Mode: {t.get('flight_mode'):<9} | "
+                  f"Bat: {t.get('battery_voltage', 0.0):5.2f}V | "
+                  f"Roll: {t.get('attitude_roll', 0.0):+5.1f}° | "
+                  f"Pitch: {t.get('attitude_pitch', 0.0):+5.1f}° | "
+                  f"Hdg: {t.get('heading', 0.0):5.1f}° | "
+                  f"Alt: {t.get('altitude_relative', 0.0):4.1f}m | "
+                  f"Sats: {t.get('satellites', 0):2d} | "
+                  f"CPU: {sbc.get('cpu_temp_c', 0.0):4.1f}°C")
 
 if __name__ == "__main__":
     main()

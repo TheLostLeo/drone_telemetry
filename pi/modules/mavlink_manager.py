@@ -7,8 +7,9 @@ File: pi/modules/mavlink_manager.py
 Description:
   Singleton MAVLink reader that exclusively connects to Pixhawk 2.4.8 on TELEM2
   (/dev/serial0 @ 115200 baud) or USB (/dev/ttyACM0). Ingests all 11 categories
-  of real live flight telemetry, computes derived metrics (PID error, cell delta,
-  heading), and provides a thread-safe snapshot for WebSockets and Radio TX.
+  of real live flight telemetry, requests active streams from ArduPilot, computes
+  derived metrics (PID error, cell delta, heading), and provides a thread-safe
+  snapshot for WebSockets and Radio TX.
 ======================================================================================
 """
 
@@ -122,6 +123,49 @@ class MAVLinkManager:
         else:
             self._run_live_mavlink()
 
+    def _request_all_streams(self, mavutil):
+        """Requests individual telemetry streams and sets message intervals on ArduPilot."""
+        if not self.mav:
+            return
+
+        try:
+            # 1. Standard MAVLink stream requests
+            streams = [
+                mavutil.mavlink.MAV_DATA_STREAM_ALL,
+                mavutil.mavlink.MAV_DATA_STREAM_RAW_SENSORS,
+                mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS,
+                mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+                mavutil.mavlink.MAV_DATA_STREAM_POSITION,
+                mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
+                mavutil.mavlink.MAV_DATA_STREAM_EXTRA2,
+                mavutil.mavlink.MAV_DATA_STREAM_EXTRA3
+            ]
+            for s in streams:
+                self.mav.mav.request_data_stream_send(
+                    self.mav.target_system, self.mav.target_component,
+                    s, 10, 1
+                )
+
+            # 2. Modern MAV_CMD_SET_MESSAGE_INTERVAL commands (in microseconds)
+            intervals = {
+                mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE: 100000,          # 10 Hz (100ms)
+                mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS: 500000,        # 2 Hz (500ms)
+                mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT: 200000,# 5 Hz (200ms)
+                mavutil.mavlink.MAVLINK_MSG_ID_VFR_HUD: 200000,           # 5 Hz (200ms)
+                mavutil.mavlink.MAVLINK_MSG_ID_RAW_IMU: 100000,           # 10 Hz (100ms)
+                mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW: 200000,  # 5 Hz (200ms)
+                mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS: 500000     # 2 Hz (500ms)
+            }
+            for msg_id, interval_us in intervals.items():
+                self.mav.mav.command_long_send(
+                    self.mav.target_system, self.mav.target_component,
+                    mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                    0,
+                    msg_id, interval_us, 0, 0, 0, 0, 0
+                )
+        except Exception as e:
+            pass
+
     def _run_live_mavlink(self):
         try:
             from pymavlink import mavutil
@@ -150,7 +194,7 @@ class MAVLinkManager:
 
             print("[*] Waiting for MAVLink Heartbeat from Pixhawk...")
             try:
-                hb = self.mav.wait_heartbeat(timeout=5)
+                hb = self.mav.wait_heartbeat(timeout=8)
                 if hb:
                     print(f"[✓] Heartbeat received from Pixhawk (System: {self.mav.target_system}, Component: {self.mav.target_component})")
                     with self._lock:
@@ -158,24 +202,26 @@ class MAVLinkManager:
             except Exception:
                 pass
 
-            # Request live stream rates at 10 Hz
-            try:
-                self.mav.mav.request_data_stream_send(
-                    self.mav.target_system, self.mav.target_component,
-                    mavutil.mavlink.MAV_DATA_STREAM_ALL, 10, 1
-                )
-            except Exception:
-                pass
+            # Initial stream request
+            self._request_all_streams(mavutil)
+            last_stream_request_time = time.time()
+            packet_count = 0
 
             # Live Ingestion Loop
             while self.running:
                 try:
-                    msg = self.mav.recv_match(blocking=True, timeout=1.0)
+                    # Periodically re-request streams every 5s as keep-alive
+                    now = time.time()
+                    if now - last_stream_request_time >= 5.0:
+                        last_stream_request_time = now
+                        self._request_all_streams(mavutil)
+
+                    msg = self.mav.recv_match(blocking=True, timeout=0.5)
                     if not msg:
                         continue
-                    
+
+                    packet_count += 1
                     msg_type = msg.get_type()
-                    now = time.time()
 
                     with self._lock:
                         self.state["last_packet_timestamp"] = now
@@ -255,7 +301,6 @@ class MAVLinkManager:
                             self.state["gyro_x"] = round(math.degrees(msg.rollspeed), 2)
                             self.state["gyro_y"] = round(math.degrees(msg.pitchspeed), 2)
                             self.state["gyro_z"] = round(math.degrees(msg.yawspeed), 2)
-                            # Update PID error
                             self.state["error_roll"] = round(self.state["target_roll"] - self.state["attitude_roll"], 2)
                             self.state["error_pitch"] = round(self.state["target_pitch"] - self.state["attitude_pitch"], 2)
 
