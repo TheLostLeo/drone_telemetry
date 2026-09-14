@@ -1,16 +1,20 @@
-# System Architecture & Technical Detail (Grafana + Raspberry Pi)
+# Master Companion Server Architecture & Web Dashboard
 
-### 1. Dedicated Grafana Prometheus Exporter Architecture
-The telemetry hub running on the Raspberry Pi serves as a dedicated Prometheus metrics exporter (`pi/grafana_exporter.py`).
-- **Input Stream**: Connects to Pixhawk 2.4.8 (via `/dev/ttyACM0` for USB testing or `/dev/serial0` for TELEM2 UART @ 115200 baud).
-- **Single Serial Owner**: `MAVLinkManager` exclusively manages the serial link, parsing all MAVLink2 packets into thread-safe memory.
-- **SBC Telemetry**: `SBCMonitor` queries `/proc` and `/sys` to monitor Raspberry Pi CPU core temperatures, CPU load %, RAM usage, and disk stats.
-- **Prometheus Export**: Exposes standard Prometheus text metrics at `http://<pi-ip>:8000/metrics`.
+### 1. Modular Architecture Overview
+The Raspberry Pi 4B runs a unified supervisor script (`pi/main.py`) that coordinates three concurrent background modules over a shared MAVLink connection:
 
-### 2. PC Grafana Visualization Suite
-Grafana runs on your PC / laptop and scrapes the Raspberry Pi directly.
-The pre-configured dashboard (`pi/grafana_dashboard.json`) organizes all 11 telemetry categories into 4 structured sections:
-1. **Flight State & Critical Status**: Arming state, Total Battery Voltage gauge, Altitude AGL, Compass Heading, RC RSSI.
-2. **Sensors, Gyro Rates & Attitude**: Real-time 3-Axis Gyroscope rates ($\omega_x, \omega_y, \omega_z$), Euler attitude angles (Roll/Pitch/Yaw), 3-Axis Accelerometer ($A_x, A_y, A_z$), and PID tracking error.
-3. **Power, Cells & Motor Outputs**: Individual 6-cell voltage bar gauges with balance delta, and 4-channel motor PWM equalizer bars.
-4. **Raspberry Pi SBC Diagnostics**: Real-time Raspberry Pi CPU temperature gauge with thermal warnings, CPU load %, and RAM usage.
+```
+pi/main.py (Master Supervisor)
+├── modules/mavlink_manager.py     (Singleton MAVLink Serial Owner)
+├── modules/sbc_monitor.py         (Pi CPU Temp, Load, RAM Diagnostics)
+├── modules/radio_tx_module.py     [MODULE 1] NRF24L01+ 20-byte Compact RF Broadcaster
+├── modules/web_dashboard_module.py [MODULE 2] Mission Control Web Dashboard & WebSockets (:8000)
+└── modules/grid_search_module.py  [MODULE 3] Boustrophedon Grid Search Autonomy Engine
+```
+
+### 2. Module Responsibilities
+- **`mavlink_manager.py`**: Manages exclusive serial access to `/dev/serial0` (TELEM2 @ 115200 baud) or `/dev/ttyACM0` (USB). Decodes 11 categories of flight telemetry into thread-safe memory.
+- **`sbc_monitor.py`**: Queries Linux `/proc` and `/sys` to extract CPU core temperature (°C), CPU load %, RAM usage, and disk space.
+- **`radio_tx_module.py` (Module 1)**: Packs telemetry into the 20-byte struct with 8-bit XOR checksum and transmits at 5 Hz over hardware SPI0 to the handheld ESP32 ground unit.
+- **`web_dashboard_module.py` (Module 2)**: Serves the interactive aerospace Mission Control UI over port 8000 with 10 Hz zero-latency WebSockets, Leaflet GPS satellite tracking, and real-time Chart.js telemetry curves.
+- **`grid_search_module.py` (Module 3)**: Generates serpentine lawnmower grid search waypoints from center coordinates + radius, and uploads MAVLink missions directly to Pixhawk for autonomous execution.

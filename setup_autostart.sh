@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ======================================================================================
-# Setup Script: Install & Enable Drone Telemetry Grafana Exporter on Raspberry Pi Boot
+# Setup Script: Install & Enable Drone Telemetry Master Companion Server on Boot
 # Location: /storage/projects/drone_telemetry/setup_autostart.sh
 # ======================================================================================
 
@@ -26,7 +26,7 @@ else
 fi
 
 echo "=============================================================="
-echo "    Drone Telemetry - Grafana Exporter Auto-Start Setup       "
+echo "   Drone Telemetry - Master Companion Server Auto-Start Setup "
 echo "=============================================================="
 echo "[*] User:            ${CURRENT_USER}"
 echo "[*] Working Dir:     ${SCRIPT_DIR}"
@@ -39,10 +39,10 @@ echo "[*] Unmasking service if needed..."
 sudo systemctl unmask "${SERVICE_NAME}" 2>/dev/null || true
 sudo rm -f "/etc/systemd/system/${SERVICE_NAME}" 2>/dev/null || true
 
-# 2. Generate systemd service file with dynamic paths
+# 2. Generate systemd service file running pi/main.py
 cat << SERVICE_EOF | sudo tee "${SERVICE_PATH}" > /dev/null
 [Unit]
-Description=Drone Telemetry Grafana Prometheus Exporter
+Description=Drone Telemetry Master Companion Server (Radio TX + Web Dashboard + Grid Search)
 After=network.target local-fs.target
 Wants=network.target
 
@@ -50,7 +50,7 @@ Wants=network.target
 Type=simple
 User=${CURRENT_USER}
 WorkingDirectory=${SCRIPT_DIR}
-ExecStart=${PYTHON_EXEC} ${SCRIPT_DIR}/pi/grafana_exporter.py --port /dev/serial0 --baud 115200 --metrics-port 8000
+ExecStart=${PYTHON_EXEC} ${SCRIPT_DIR}/pi/main.py --port /dev/serial0 --baud 115200 --web-port 8000 --radio-rate 5.0
 Restart=always
 RestartSec=3
 StandardOutput=journal
