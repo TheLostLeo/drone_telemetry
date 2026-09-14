@@ -184,8 +184,9 @@ document.addEventListener('DOMContentLoaded', () => {
       el.batBar.style.background = 'var(--accent-blue)';
     }
 
-    el.altRel.textContent = (data.altitude_relative || 0).toFixed(1);
-    el.altMsl.textContent = (data.altitude_msl || 0).toFixed(1);
+    const displayedAlt = (data.altitude_relative !== 0 ? data.altitude_relative : (data.altitude_msl || 0));
+    el.altRel.textContent = (displayedAlt || 0).toFixed(1);
+    el.altMsl.textContent = (data.altitude_msl || displayedAlt || 0).toFixed(1);
     el.climb.textContent = (data.climb_rate >= 0 ? '+' : '') + (data.climb_rate || 0).toFixed(1);
 
     const hdg = Math.round(data.heading || 0);
