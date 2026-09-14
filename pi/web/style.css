@@ -719,6 +719,7 @@ body {
   gap: 10px;
 }
 
+.alert-box {
   padding: 8px 12px;
   border-radius: 6px;
   font-size: 12px;
@@ -739,6 +740,42 @@ body {
 
 .hidden {
   display: none !important;
+}
+
+/* Leaflet Layer Switcher Control */
+.leaflet-control-layers {
+  background: rgba(18, 24, 36, 0.92) !important;
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border-color) !important;
+  border-radius: 8px !important;
+  color: #fff !important;
+  font-family: var(--font-main) !important;
+  font-size: 11px !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6) !important;
+  padding: 8px 12px !important;
+}
+
+.leaflet-control-layers-toggle {
+  filter: invert(1) brightness(1.5);
+}
+
+.leaflet-control-layers label {
+  color: var(--text-main);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+  transition: color 0.2s;
+}
+
+.leaflet-control-layers label:hover {
+  color: var(--accent-cyan);
+}
+
+.leaflet-control-layers input[type="radio"] {
+  accent-color: var(--accent-cyan);
+  cursor: pointer;
 }
 
 /* ======================================================================================

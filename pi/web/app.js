@@ -110,9 +110,44 @@ document.addEventListener('DOMContentLoaded', () => {
       attributionControl: false
     });
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      maxZoom: 20
-    }).addTo(map);
+    // Google Maps Tile Layers (Hybrid, Terrain, Roadmap, Satellite)
+    const googleHybrid = L.tileLayer('https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
+      maxZoom: 21,
+      subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
+    });
+
+    const googleTerrain = L.tileLayer('https://{s}.google.com/vt/lyrs=p&x={x}&y={y}&z={z}', {
+      maxZoom: 21,
+      subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
+    });
+
+    const googleRoadmap = L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
+      maxZoom: 21,
+      subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
+    });
+
+    const googleSatellite = L.tileLayer('https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+      maxZoom: 21,
+      subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
+    });
+
+    const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19
+    });
+
+    // Default layer: Google Hybrid (Satellite + Buildings + Streets)
+    googleHybrid.addTo(map);
+
+    // Layer Switcher Control
+    const baseMaps = {
+      "🛰️ Google Hybrid (Satellite + Buildings & Roads)": googleHybrid,
+      "⛰️ Google Terrain (Elevation & Relief)": googleTerrain,
+      "🏙️ Google Roadmap (Streets & Buildings)": googleRoadmap,
+      "🌍 Google Satellite (Pure Imagery)": googleSatellite,
+      "🗺️ OpenStreetMap": osm
+    };
+
+    L.control.layers(baseMaps, null, { position: 'topleft', collapsed: true }).addTo(map);
 
     const droneIcon = L.divIcon({
       className: 'drone-leaflet-icon',
