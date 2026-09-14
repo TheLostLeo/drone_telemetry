@@ -65,11 +65,12 @@ while time.time() - start_time < 20:
     if mtype == 'BAD_DATA':
         continue
 
-    if mtype in ('ATTITUDE', 'AHRS', 'AHRS2', 'AHRS3'):
-        r = round(math.degrees(msg.roll), 2)
-        p = round(math.degrees(msg.pitch), 2)
-        y = round(math.degrees(msg.yaw) % 360, 2)
-        print(f"🔥 >>> [ATTITUDE] Roll: {r:+6.1f}° | Pitch: {p:+6.1f}° | Yaw: {y:5.1f}°")
+    if mtype in ('ATTITUDE', 'AHRS2', 'AHRS3'):
+        if hasattr(msg, 'roll'):
+            r = round(math.degrees(msg.roll), 2)
+            p = round(math.degrees(msg.pitch), 2)
+            y = round(math.degrees(msg.yaw) % 360, 2)
+            print(f"🔥 >>> [ATTITUDE] Roll: {r:+6.1f}° | Pitch: {p:+6.1f}° | Yaw: {y:5.1f}°")
     elif mtype in ('RAW_IMU', 'HIGHRES_IMU', 'SCALED_IMU'):
         gz = getattr(msg, 'zacc', 0)
         gx = getattr(msg, 'xgyro', 0)

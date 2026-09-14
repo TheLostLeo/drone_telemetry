@@ -375,15 +375,16 @@ class MAVLinkManager:
                                         self.state["altitude_relative"] = round(msg.alt, 1)
 
                             # 7. ATTITUDE & AHRS (Euler Angles & Angular Rates)
-                            elif msg_type in ('ATTITUDE', 'AHRS', 'AHRS2', 'AHRS3'):
-                                self.state["attitude_roll"] = round(math.degrees(msg.roll), 2)
-                                self.state["attitude_pitch"] = round(math.degrees(msg.pitch), 2)
-                                self.state["attitude_yaw"] = round(math.degrees(msg.yaw) % 360, 2)
+                            elif msg_type in ('ATTITUDE', 'AHRS2', 'AHRS3'):
+                                if hasattr(msg, 'roll'):
+                                    self.state["attitude_roll"] = round(math.degrees(msg.roll), 2)
+                                    self.state["attitude_pitch"] = round(math.degrees(msg.pitch), 2)
+                                    self.state["attitude_yaw"] = round(math.degrees(msg.yaw) % 360, 2)
                                 if hasattr(msg, 'rollspeed'):
                                     self.state["gyro_x"] = round(math.degrees(msg.rollspeed), 2)
                                     self.state["gyro_y"] = round(math.degrees(msg.pitchspeed), 2)
                                     self.state["gyro_z"] = round(math.degrees(msg.yawspeed), 2)
-                                if self.state["heading"] == 0:
+                                if self.state["heading"] == 0 and "attitude_yaw" in self.state:
                                     self.state["heading"] = self.state["attitude_yaw"]
                                 self.state["error_roll"] = round(self.state["target_roll"] - self.state["attitude_roll"], 2)
                                 self.state["error_pitch"] = round(self.state["target_pitch"] - self.state["attitude_pitch"], 2)
