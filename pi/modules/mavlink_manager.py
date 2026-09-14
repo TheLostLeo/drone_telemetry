@@ -127,14 +127,15 @@ class MAVLinkManager:
             self._run_live_mavlink()
 
     def _send_companion_heartbeat(self, mavutil):
-        """Sends periodic 1 Hz heartbeat from Pi to Pixhawk to keep streams active."""
+        """Sends periodic 1 Hz GCS heartbeat from Pi to Pixhawk to keep streams active."""
         if not self.mav:
             return
         try:
             self.mav.mav.heartbeat_send(
-                mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
+                mavutil.mavlink.MAV_TYPE_GCS,
                 mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-                0, 0, 0
+                0, 0,
+                mavutil.mavlink.MAV_STATE_ACTIVE
             )
         except Exception:
             pass
@@ -368,6 +369,10 @@ class MAVLinkManager:
                                 self.state["climb_rate"] = round(msg.climb, 2)
                                 if msg.heading != 0:
                                     self.state["heading"] = round(msg.heading, 1)
+                                if hasattr(msg, 'alt') and msg.alt is not None:
+                                    self.state["altitude_msl"] = round(msg.alt, 1)
+                                    if self.state["altitude_relative"] == 0.0:
+                                        self.state["altitude_relative"] = round(msg.alt, 1)
 
                             # 7. ATTITUDE & AHRS (Euler Angles & Angular Rates)
                             elif msg_type in ('ATTITUDE', 'AHRS', 'AHRS2', 'AHRS3'):
