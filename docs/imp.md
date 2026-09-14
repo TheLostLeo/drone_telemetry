@@ -1,39 +1,17 @@
-# Drone Telemetry & Mission Control Quick Reference
+# Drone Telemetry Grafana Exporter Quick Reference
 
 ### 🛠️ Hardware Pinouts
 
 #### Pixhawk 2.4.8 (TELEM2 DF13 6-Pin) to Raspberry Pi 4B GPIO
-- **Pin 1 (VCC +5V)**: ❌ **DO NOT CONNECT** *(Pi is powered by separate BEC/UBEC)*
+- **Pin 1 (VCC +5V)**: ❌ **DO NOT CONNECT** *(Pi is powered independently)*
 - **Pin 2 (TX Out)**: ➡️ **Pi Pin 10 (GPIO 15 / RXD0)**
 - **Pin 3 (RX In)**: ⬅️ **Pi Pin 8 (GPIO 14 / TXD0)**
 - **Pin 4 (CTS)**: ❌ **Unused** *(Flow control disabled)*
 - **Pin 5 (RTS)**: ❌ **Unused** *(Flow control disabled)*
 - **Pin 6 (GND)**: ➡️ **Pi Pin 9 (Ground)**
 
-#### ESP32 Receiver Unit
-- **NRF24L01+ (via HW-200 Base)**:
-  - VCC -> ESP32 VIN (5V)
-  - GND -> GND
-  - CE -> GPIO 4
-  - CSN -> GPIO 5
-  - SCK -> GPIO 18 (VSPI SCK)
-  - MOSI -> GPIO 23 (VSPI MOSI)
-  - MISO -> GPIO 19 (VSPI MISO)
-- **1.3" OLED (JMD1.3A SH1106)**:
-  - VCC -> 3.3V / 5V
-  - GND -> GND
-  - SCL -> GPIO 22
-  - SDA -> GPIO 21
-
-#### Raspberry Pi 4B Transmitter Unit (NRF24L01+)
-- **NRF24L01+ (via HW-200 Base)**:
-  - VCC -> Pin 2 (5V Power)
-  - GND -> Pin 20 or Pin 25 (GND)
-  - CE -> Pin 15 (GPIO 22)
-  - CSN -> Pin 24 (GPIO 8 / SPI0 CE0)
-  - SCK -> Pin 23 (GPIO 11 / SPI0 SCLK)
-  - MOSI -> Pin 19 (GPIO 10 / SPI0 MOSI)
-  - MISO -> Pin 21 (GPIO 9 / SPI0 MISO)
+#### Testing via USB Port
+- Connect Pixhawk Micro-USB to Raspberry Pi USB port (`/dev/ttyACM0`).
 
 ---
 
@@ -48,49 +26,55 @@
 
 ---
 
-### 🚀 Running the Web Dashboard & Telemetry Server
+### 🚀 Running the Grafana Telemetry Exporter on Raspberry Pi
 
-1. **Launch Dashboard Server**:
+1. **Launch Prometheus Exporter on Pi**:
    ```bash
-   # Live Pixhawk connection (default: /dev/serial0 @ 115200)
-   python3 pi/dashboard_server.py --port /dev/serial0 --baud 115200 --web-port 8000
+   # For USB connection (/dev/ttyACM0 @ 115200)
+   python3 pi/grafana_exporter.py --port /dev/ttyACM0 --baud 115200 --metrics-port 8000
 
-   # Or in Simulation Mode for testing without hardware
-   python3 pi/dashboard_server.py --simulate --web-port 8000
+   # For GPIO TELEM2 connection (/dev/serial0 @ 115200)
+   python3 pi/grafana_exporter.py --port /dev/serial0 --baud 115200 --metrics-port 8000
+
+   # Simulation test mode
+   python3 pi/grafana_exporter.py --simulate --metrics-port 8000
    ```
 
-2. **Access Interfaces**:
-   - **Mission Control Web UI**: `http://<pi-ip>:8000`
-   - **Prometheus / Grafana Metrics**: `http://<pi-ip>:8000/metrics`
-   - **Live WebSocket Feed**: `ws://<pi-ip>:8000/ws/telemetry`
-   - **JSON Snapshot API**: `http://<pi-ip>:8000/api/telemetry`
-
-3. **Importing into Grafana**:
-   - Import `pi/grafana_dashboard.json` into your Grafana instance pointing to Prometheus scraping `http://<pi-ip>:8000/metrics`.
-
-4. **Testing TELEM2 Link**:
-   ```bash
-   python3 pi/test_mavlink_telem2.py --port /dev/serial0 --baud 115200
-   ```
+2. **Endpoints Provided by Pi**:
+   - Prometheus Metrics: `http://<pi-ip>:8000/metrics`
+   - JSON Snapshot: `http://<pi-ip>:8000/api/telemetry`
 
 ---
 
-### 🔄 Auto-Start on Boot (Systemd Service)
+### 📊 Setting up Grafana on Your PC
 
-From the project root directory:
+1. **Configure Prometheus Data Source in Grafana**:
+   - In Grafana (e.g. `http://localhost:3000` on your PC), go to **Connections -> Data Sources -> Add Data Source -> Prometheus**.
+   - Set Prometheus Server URL to: `http://<your-pi-ip-address>:8000` (or `http://pi.local:8000`).
+   - Click **Save & Test**.
+
+2. **Import Dashboard**:
+   - In Grafana, click **Dashboards -> New -> Import**.
+   - Upload or paste the contents of `pi/grafana_dashboard.json`.
+   - Select your Prometheus data source and click **Import**.
+
+3. **All 11 Live Panels Ready**:
+   - Arming state & flight mode
+   - Total battery voltage (V), current (A), remaining (%)
+   - 6-Cell individual voltages (V) & balance delta ($\Delta V$)
+   - Relative altitude (AGL), MSL & climb rate (m/s)
+   - 360° Compass heading
+   - RC signal strength (RSSI %)
+   - 3-Axis Gyroscope rates ($\omega_x, \omega_y, \omega_z$ in deg/s)
+   - 3-Axis Accelerometer ($A_x, A_y, A_z$ in g)
+   - Euler attitude (Roll / Pitch / Yaw) & PID tracking errors
+   - 4-Channel motor outputs (PWM $\mu\text{s}$ & %)
+   - Raspberry Pi SBC diagnostics (CPU temperature, CPU load, RAM %)
+
+---
+
+### 🔄 Auto-Start on Pi Boot
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Enable and start autostart service on boot
 ./setup_autostart.sh
-
-# Check live service status
 sudo systemctl status drone-telemetry.service
-
-# View real-time journal logs
-journalctl -u drone-telemetry.service -f
-
-# Disable autostart
-./disable_autostart.sh
 ```

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ======================================================================================
-# Setup Script: Install & Enable Drone Telemetry Service on Raspberry Pi Boot
+# Setup Script: Install & Enable Drone Telemetry Grafana Exporter on Raspberry Pi Boot
 # Location: /storage/projects/drone_telemetry/setup_autostart.sh
 # ======================================================================================
 
@@ -26,7 +26,7 @@ else
 fi
 
 echo "=============================================================="
-echo "    Drone Telemetry - Auto-Start Setup (systemd service)      "
+echo "    Drone Telemetry - Grafana Exporter Auto-Start Setup       "
 echo "=============================================================="
 echo "[*] User:            ${CURRENT_USER}"
 echo "[*] Working Dir:     ${SCRIPT_DIR}"
@@ -42,7 +42,7 @@ sudo rm -f "/etc/systemd/system/${SERVICE_NAME}" 2>/dev/null || true
 # 2. Generate systemd service file with dynamic paths
 cat << SERVICE_EOF | sudo tee "${SERVICE_PATH}" > /dev/null
 [Unit]
-Description=Drone Telemetry Web Dashboard & MAVLink Server
+Description=Drone Telemetry Grafana Prometheus Exporter
 After=network.target local-fs.target
 Wants=network.target
 
@@ -50,7 +50,7 @@ Wants=network.target
 Type=simple
 User=${CURRENT_USER}
 WorkingDirectory=${SCRIPT_DIR}
-ExecStart=${PYTHON_EXEC} ${SCRIPT_DIR}/pi/dashboard_server.py --port /dev/serial0 --baud 115200 --web-port 8000
+ExecStart=${PYTHON_EXEC} ${SCRIPT_DIR}/pi/grafana_exporter.py --port /dev/serial0 --baud 115200 --metrics-port 8000
 Restart=always
 RestartSec=3
 StandardOutput=journal
