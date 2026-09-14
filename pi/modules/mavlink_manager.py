@@ -5,11 +5,14 @@ Module: MAVLink Telemetry Manager & Shared State Hub
 File: pi/modules/mavlink_manager.py
 
 Description:
-  Singleton MAVLink reader that exclusively connects to Pixhawk 2.4.8 on TELEM2
-  (/dev/serial0 @ 115200 baud) or USB (/dev/ttyACM0). Ingests all 11 categories
-  of real live flight telemetry, requests active streams from ArduPilot, computes
-  derived metrics (PID error, cell delta, heading), and provides a thread-safe
-  snapshot for WebSockets and Radio TX.
+  Singleton MAVLink reader that connects to Pixhawk 2.4.8 on TELEM2 (/dev/serial0)
+  or USB (/dev/ttyACM0 @ 115200 baud).
+  
+  Key Features:
+  - Broadcasts 1 Hz Companion Heartbeats to keep ArduPilot active telemetry streaming alive
+  - Requests all sensor & attitude streams at 10 Hz
+  - Decodes ATTITUDE, AHRS, SYS_STATUS, GLOBAL_POSITION_INT, VFR_HUD, RAW_IMU, SERVO_OUTPUT
+  - Thread-safe state store for WebSockets and Radio TX
 ======================================================================================
 """
 
@@ -123,54 +126,70 @@ class MAVLinkManager:
         else:
             self._run_live_mavlink()
 
+    def _send_companion_heartbeat(self, mavutil):
+        """Sends periodic 1 Hz heartbeat from Pi to Pixhawk to keep streams active."""
+        if not self.mav:
+            return
+        try:
+            self.mav.mav.heartbeat_send(
+                mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
+                mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                0, 0, 0
+            )
+        except Exception:
+            pass
+
     def _request_all_streams(self, mavutil):
         """Requests individual telemetry streams and sets message intervals on ArduPilot."""
         if not self.mav:
             return
 
         try:
-            # 1. Standard MAVLink stream requests
-            streams = [
-                mavutil.mavlink.MAV_DATA_STREAM_ALL,
-                mavutil.mavlink.MAV_DATA_STREAM_RAW_SENSORS,
-                mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS,
-                mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
-                mavutil.mavlink.MAV_DATA_STREAM_POSITION,
-                mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
-                mavutil.mavlink.MAV_DATA_STREAM_EXTRA2,
-                mavutil.mavlink.MAV_DATA_STREAM_EXTRA3
-            ]
-            for s in streams:
-                self.mav.mav.request_data_stream_send(
-                    self.mav.target_system, self.mav.target_component,
-                    s, 10, 1
-                )
+            # Send stream requests targeting both Component 1 (Autopilot) and Component 0 (Broadcast)
+            target_comps = [1, 0]
+            if getattr(self.mav, "target_component", 0) not in target_comps:
+                target_comps.append(self.mav.target_component)
 
-            # 2. Modern MAV_CMD_SET_MESSAGE_INTERVAL commands (in microseconds)
+            for comp_id in target_comps:
+                for s in [
+                    mavutil.mavlink.MAV_DATA_STREAM_ALL,
+                    mavutil.mavlink.MAV_DATA_STREAM_RAW_SENSORS,
+                    mavutil.mavlink.MAV_DATA_STREAM_EXTENDED_STATUS,
+                    mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS,
+                    mavutil.mavlink.MAV_DATA_STREAM_POSITION,
+                    mavutil.mavlink.MAV_DATA_STREAM_EXTRA1,
+                    mavutil.mavlink.MAV_DATA_STREAM_EXTRA2,
+                    mavutil.mavlink.MAV_DATA_STREAM_EXTRA3
+                ]:
+                    self.mav.mav.request_data_stream_send(
+                        self.mav.target_system, comp_id, s, 10, 1
+                    )
+
+            # Modern message intervals (in microseconds)
             intervals = {
-                mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE: 100000,          # 10 Hz (100ms)
-                mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS: 500000,        # 2 Hz (500ms)
-                mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT: 200000,# 5 Hz (200ms)
-                mavutil.mavlink.MAVLINK_MSG_ID_VFR_HUD: 200000,           # 5 Hz (200ms)
-                mavutil.mavlink.MAVLINK_MSG_ID_RAW_IMU: 100000,           # 10 Hz (100ms)
-                mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW: 200000,  # 5 Hz (200ms)
-                mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS: 500000     # 2 Hz (500ms)
+                mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE: 100000,
+                mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS: 500000,
+                mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT: 200000,
+                mavutil.mavlink.MAVLINK_MSG_ID_VFR_HUD: 200000,
+                mavutil.mavlink.MAVLINK_MSG_ID_RAW_IMU: 100000,
+                mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW: 200000,
+                mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS: 500000
             }
             for msg_id, interval_us in intervals.items():
                 self.mav.mav.command_long_send(
-                    self.mav.target_system, self.mav.target_component,
+                    self.mav.target_system, 1,
                     mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
                     0,
                     msg_id, interval_us, 0, 0, 0, 0, 0
                 )
-        except Exception as e:
+        except Exception:
             pass
 
     def _run_live_mavlink(self):
         try:
             from pymavlink import mavutil
         except ImportError:
-            print("[!] ERROR: 'pymavlink' is not installed on system. Run: pip install pymavlink")
+            print("[!] ERROR: 'pymavlink' is not installed. Run: pip install pymavlink")
             return
 
         ports_to_try = [self.port, "/dev/ttyACM0", "/dev/serial0", "/dev/ttyAMA0", "/dev/ttyUSB0"]
@@ -202,25 +221,34 @@ class MAVLinkManager:
             except Exception:
                 pass
 
-            # Initial stream request
+            # Activate streams and send companion heartbeat
+            self._send_companion_heartbeat(mavutil)
             self._request_all_streams(mavutil)
+
+            last_heartbeat_time = time.time()
             last_stream_request_time = time.time()
-            packet_count = 0
 
             # Live Ingestion Loop
             while self.running:
                 try:
-                    # Periodically re-request streams every 5s as keep-alive
                     now = time.time()
-                    if now - last_stream_request_time >= 5.0:
+
+                    # 1. Send Companion Heartbeat at 1 Hz (CRITICAL for ArduPilot to stream data!)
+                    if now - last_heartbeat_time >= 1.0:
+                        last_heartbeat_time = now
+                        self._send_companion_heartbeat(mavutil)
+
+                    # 2. Re-request stream keep-alive every 4s
+                    if now - last_stream_request_time >= 4.0:
                         last_stream_request_time = now
                         self._request_all_streams(mavutil)
 
-                    msg = self.mav.recv_match(blocking=True, timeout=0.5)
+                    # 3. Read incoming packets (drain all pending)
+                    msg = self.mav.recv_match(blocking=False)
                     if not msg:
+                        time.sleep(0.005) # Yield CPU
                         continue
 
-                    packet_count += 1
                     msg_type = msg.get_type()
 
                     with self._lock:
@@ -252,7 +280,7 @@ class MAVLinkManager:
                             if 0 <= msg.battery_remaining <= 100:
                                 self.state["battery_remaining"] = msg.battery_remaining
 
-                        # 3. BATTERY_STATUS (Individual Cell Voltages)
+                        # 3. BATTERY_STATUS
                         elif msg_type == 'BATTERY_STATUS':
                             if len(msg.voltages) > 0:
                                 valid_cells = []
@@ -293,14 +321,17 @@ class MAVLinkManager:
                             if self.state["heading"] == 0:
                                 self.state["heading"] = round(msg.heading, 1)
 
-                        # 7. ATTITUDE (Euler Angles & Rates)
-                        elif msg_type == 'ATTITUDE':
+                        # 7. ATTITUDE & AHRS (Euler Angles & Rates)
+                        elif msg_type in ('ATTITUDE', 'AHRS', 'AHRS2'):
                             self.state["attitude_roll"] = round(math.degrees(msg.roll), 2)
                             self.state["attitude_pitch"] = round(math.degrees(msg.pitch), 2)
                             self.state["attitude_yaw"] = round(math.degrees(msg.yaw) % 360, 2)
-                            self.state["gyro_x"] = round(math.degrees(msg.rollspeed), 2)
-                            self.state["gyro_y"] = round(math.degrees(msg.pitchspeed), 2)
-                            self.state["gyro_z"] = round(math.degrees(msg.yawspeed), 2)
+                            if hasattr(msg, 'rollspeed'):
+                                self.state["gyro_x"] = round(math.degrees(msg.rollspeed), 2)
+                                self.state["gyro_y"] = round(math.degrees(msg.pitchspeed), 2)
+                                self.state["gyro_z"] = round(math.degrees(msg.yawspeed), 2)
+                            if self.state["heading"] == 0:
+                                self.state["heading"] = self.state["attitude_yaw"]
                             self.state["error_roll"] = round(self.state["target_roll"] - self.state["attitude_roll"], 2)
                             self.state["error_pitch"] = round(self.state["target_pitch"] - self.state["attitude_pitch"], 2)
 
@@ -320,10 +351,14 @@ class MAVLinkManager:
                                 pass
 
                         # 9. RAW_IMU / SCALED_IMU
-                        elif msg_type in ('RAW_IMU', 'SCALED_IMU2'):
+                        elif msg_type in ('RAW_IMU', 'SCALED_IMU', 'SCALED_IMU2', 'SCALED_IMU3'):
                             self.state["accel_x"] = round((msg.xacc / 1000.0) * 9.81, 2)
                             self.state["accel_y"] = round((msg.yacc / 1000.0) * 9.81, 2)
                             self.state["accel_z"] = round((msg.zacc / 1000.0) * 9.81, 2)
+                            if hasattr(msg, 'xgyro') and self.state["gyro_x"] == 0:
+                                self.state["gyro_x"] = round(math.degrees(msg.xgyro / 1000.0), 2)
+                                self.state["gyro_y"] = round(math.degrees(msg.ygyro / 1000.0), 2)
+                                self.state["gyro_z"] = round(math.degrees(msg.zgyro / 1000.0), 2)
 
                         # 10. SERVO_OUTPUT_RAW (Motor PWMs 1-4)
                         elif msg_type == 'SERVO_OUTPUT_RAW':
