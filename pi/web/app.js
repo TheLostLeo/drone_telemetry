@@ -1,9 +1,9 @@
 /* ======================================================================================
-   Drone Mission Control - Real-Time Dashboard App (app.js)
+   Drone Mission Control & Autonomous Mission Planner App (app.js)
    ====================================================================================== */
 
 document.addEventListener('DOMContentLoaded', () => {
-  // 1. STATE & DOM ELEMENTS
+  // 1. DOM ELEMENTS & STATE
   const el = {
     batV: document.getElementById('val-bat-v'),
     batA: document.getElementById('val-bat-a'),
@@ -41,7 +41,43 @@ document.addEventListener('DOMContentLoaded', () => {
     sbcCpuTxt: document.getElementById('sbc-cpu-txt'),
     sbcRamTxt: document.getElementById('sbc-ram-txt'),
     sbcDiskTxt: document.getElementById('sbc-disk-txt'),
-    sbcUptimeTxt: document.getElementById('sbc-uptime-txt')
+    sbcUptimeTxt: document.getElementById('sbc-uptime-txt'),
+
+    // Map HUD elements
+    hudDot: document.getElementById('hud-dot'),
+    hudMissionState: document.getElementById('hud-mission-state'),
+    hudWpTracker: document.getElementById('hud-wp-tracker'),
+    hudWpDist: document.getElementById('hud-wp-dist'),
+    hudProgressFill: document.getElementById('hud-progress-fill'),
+    btnHudStart: document.getElementById('btn-hud-start'),
+    btnHudPause: document.getElementById('btn-hud-pause'),
+    btnHudRtl: document.getElementById('btn-hud-rtl'),
+
+    // Modal & Planner elements
+    gridModal: document.getElementById('grid-modal'),
+    btnOpenModal: document.getElementById('btn-open-grid-modal'),
+    btnCloseModal: document.getElementById('btn-close-modal'),
+    btnCancelModal: document.getElementById('btn-cancel-modal'),
+    btnPickCenter: document.getElementById('btn-pick-center'),
+    radiusSlider: document.getElementById('input-radius-slider'),
+    radiusLabel: document.getElementById('val-radius-label'),
+    inputSpacing: document.getElementById('input-spacing'),
+    inputAngle: document.getElementById('input-angle'),
+    inputAltitude: document.getElementById('input-altitude'),
+    inputSpeed: document.getElementById('input-speed'),
+    inputEndAction: document.getElementById('input-end-action'),
+    inputCustomLat: document.getElementById('input-custom-lat'),
+    inputCustomLon: document.getElementById('input-custom-lon'),
+    statWpCount: document.getElementById('stat-wp-count'),
+    statTotalDist: document.getElementById('stat-total-dist'),
+    statEstTime: document.getElementById('stat-est-time'),
+    btnPreviewMission: document.getElementById('btn-preview-mission'),
+    btnSubmitGrid: document.getElementById('btn-submit-grid'),
+    btnModalStart: document.getElementById('btn-modal-start'),
+    btnModalPause: document.getElementById('btn-modal-pause'),
+    btnModalAbort: document.getElementById('btn-modal-abort'),
+    btnModalClear: document.getElementById('btn-modal-clear'),
+    alertBox: document.getElementById('mission-alert-box')
   };
 
   const motors = [1, 2, 3, 4].map(i => ({
@@ -56,9 +92,13 @@ document.addEventListener('DOMContentLoaded', () => {
   }));
 
   let currentTelemetry = {};
+  let isPickingPointOnMap = false;
+  let selectedCenter = [12.971598, 77.594562];
+  let activeWpMarkers = [];
 
-  // 2. LEAFLET MAP INITIALIZATION
-  let map, droneMarker, flightPathPolyline, searchGridBox;
+  // 2. LEAFLET MAP & MISSION LAYERS
+  let map, droneMarker, flightPathPolyline;
+  let searchCenterMarker, searchRadiusCircle, missionRoutePolyline, missionLayerGroup;
   const flightHistory = [];
   const initialCoords = [12.971598, 77.594562];
 
@@ -94,15 +134,66 @@ document.addEventListener('DOMContentLoaded', () => {
       dashArray: '4, 6'
     }).addTo(map);
 
-    searchGridBox = L.rectangle([
-      [initialCoords[0] - 0.00045, initialCoords[1] - 0.00045],
-      [initialCoords[0] + 0.00045, initialCoords[1] + 0.00045]
-    ], {
+    // Mission Preview & Autonomy Layers
+    missionLayerGroup = L.layerGroup().addTo(map);
+
+    searchRadiusCircle = L.circle(initialCoords, {
+      radius: 50,
       color: '#ffd000',
       weight: 2,
+      dashArray: '6, 6',
       fillColor: '#ffd000',
       fillOpacity: 0.08
     }).addTo(map);
+
+    // Map Click Listener for Target Point Picking
+    map.on('click', (e) => {
+      if (isPickingPointOnMap) {
+        setSearchCenter(e.latlng.lat, e.latlng.lng);
+        togglePickMode(false);
+        el.gridModal.classList.remove('hidden');
+        previewMissionRoute();
+      }
+    });
+  }
+
+  function setSearchCenter(lat, lon) {
+    selectedCenter = [lat, lon];
+    el.inputCustomLat.value = lat.toFixed(6);
+    el.inputCustomLon.value = lon.toFixed(6);
+
+    const r = parseFloat(el.radiusSlider.value) || 50;
+    searchRadiusCircle.setLatLng(selectedCenter);
+    searchRadiusCircle.setRadius(r);
+
+    if (searchCenterMarker) {
+      searchCenterMarker.setLatLng(selectedCenter);
+    } else {
+      const centerIcon = L.divIcon({
+        className: 'center-marker-icon',
+        html: '🎯',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+      });
+      searchCenterMarker = L.marker(selectedCenter, { icon: centerIcon }).addTo(map);
+    }
+  }
+
+  function togglePickMode(enable) {
+    isPickingPointOnMap = (enable !== undefined) ? enable : !isPickingPointOnMap;
+    if (isPickingPointOnMap) {
+      el.btnPickCenter.textContent = '❌ Cancel Picking (Click Map)';
+      el.btnPickCenter.style.borderColor = 'var(--accent-red)';
+      el.btnPickCenter.style.color = 'var(--accent-red)';
+      map.getContainer().style.cursor = 'crosshair';
+      el.gridModal.classList.add('hidden');
+    } else {
+      el.btnPickCenter.textContent = '📍 Pick Center on Map';
+      el.btnPickCenter.style.borderColor = '';
+      el.btnPickCenter.style.color = '';
+      map.getContainer().style.cursor = '';
+      isPickingPointOnMap = false;
+    }
   }
 
   initMap();
@@ -112,6 +203,8 @@ document.addEventListener('DOMContentLoaded', () => {
       map.panTo(droneMarker.getLatLng(), { animate: true });
     }
   });
+
+  el.btnPickCenter.addEventListener('click', () => togglePickMode());
 
   // 3. CHART.JS REAL-TIME CHARTS
   const maxDataPoints = 40;
@@ -164,7 +257,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // 4. TELEMETRY DISPATCHER
+  // 4. TELEMETRY DISPATCHER & LIVE MISSION TRACKING
   function updateTelemetry(data) {
     currentTelemetry = data;
 
@@ -180,9 +273,7 @@ document.addEventListener('DOMContentLoaded', () => {
     el.batW.textContent = w;
     el.batPct.textContent = isUsb ? 'USB' : pct;
     el.batBar.style.width = `${pct}%`;
-    if (isUsb) {
-      el.batBar.style.background = 'var(--accent-blue)';
-    }
+    if (isUsb) el.batBar.style.background = 'var(--accent-blue)';
 
     const displayedAlt = (data.altitude_relative !== 0 ? data.altitude_relative : (data.altitude_msl || 0));
     el.altRel.textContent = (displayedAlt || 0).toFixed(1);
@@ -225,6 +316,33 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     el.badgeMission.textContent = isHeartbeatLost ? 'LINK LOST' : (data.mission_state || 'STANDBY');
 
+    // Live Map HUD Update
+    if (el.hudMissionState) {
+      el.hudMissionState.textContent = `MISSION: ${data.mission_state || 'STANDBY'}`;
+      const isAuto = (data.flight_mode === 'AUTO');
+      const isLoiter = (data.flight_mode === 'LOITER');
+      el.hudDot.className = 'hud-dot' + (isAuto ? ' active' : (isLoiter ? ' paused' : ''));
+      const currSeq = data.mission_current_seq || 0;
+      const totItems = data.mission_total_items || 0;
+      el.hudWpTracker.textContent = totItems > 0 ? `WP ${currSeq} / ${totItems}` : '-- / --';
+      el.hudProgressFill.style.width = `${data.mission_progress_percent || 0}%`;
+
+      // Update Waypoint Marker active/completed classes
+      activeWpMarkers.forEach((m, idx) => {
+        const markerDom = m.getElement();
+        if (markerDom) {
+          const wpIdx = idx + 1;
+          if (wpIdx < currSeq) {
+            markerDom.className = 'leaflet-marker-icon wp-marker-icon completed';
+          } else if (wpIdx === currSeq) {
+            markerDom.className = 'leaflet-marker-icon wp-marker-icon active';
+          } else {
+            markerDom.className = 'leaflet-marker-icon wp-marker-icon';
+          }
+        }
+      });
+    }
+
     el.gpsFix.textContent = data.gps_fix_type || '3D FIX';
     el.gpsSats.textContent = `${data.satellites || 0} SATS`;
     el.gpsHdop.textContent = `HDOP: ${(data.hdop || 1.0).toFixed(1)}`;
@@ -237,9 +355,7 @@ document.addEventListener('DOMContentLoaded', () => {
       droneMarker.setLatLng(newLatLng);
 
       const svgEl = document.getElementById('drone-map-svg');
-      if (svgEl) {
-        svgEl.style.transform = `rotate(${hdg}deg)`;
-      }
+      if (svgEl) svgEl.style.transform = `rotate(${hdg}deg)`;
 
       flightHistory.push(newLatLng);
       if (flightHistory.length > 300) flightHistory.shift();
@@ -276,8 +392,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const cv = cellVals[idx] || 0.0;
       if (cv > 1.0) {
         c.val.textContent = `${cv.toFixed(2)}V`;
-        const pct = Math.max(0, Math.min(100, ((cv - 3.2) / 1.0) * 100));
-        c.bar.style.width = `${pct}%`;
+        const p = Math.max(0, Math.min(100, ((cv - 3.2) / 1.0) * 100));
+        c.bar.style.width = `${p}%`;
         c.bar.style.background = cv >= 3.7 ? 'var(--accent-green)' : (cv >= 3.5 ? 'var(--accent-yellow)' : 'var(--accent-red)');
       } else {
         c.val.textContent = '--.--';
@@ -303,7 +419,6 @@ document.addEventListener('DOMContentLoaded', () => {
       el.sbcCpuTxt.textContent = `${data.sbc.cpu_load_percent.toFixed(1)} %`;
       el.sbcRamTxt.textContent = `${data.sbc.ram_used_mb} MB / ${data.sbc.ram_total_mb} MB (${data.sbc.ram_percent.toFixed(1)}%)`;
       el.sbcDiskTxt.textContent = `${data.sbc.disk_free_gb} GB (${data.sbc.disk_percent.toFixed(0)}% used)`;
-
       const hrs = Math.floor(data.sbc.uptime_seconds / 3600);
       const mins = Math.floor((data.sbc.uptime_seconds % 3600) / 60);
       el.sbcUptimeTxt.textContent = `${hrs}h ${mins}m`;
@@ -315,78 +430,216 @@ document.addEventListener('DOMContentLoaded', () => {
     return directions[Math.round(deg / 45) % 8];
   }
 
-  // 5. MODAL INTERACTION & GRID SEARCH TRIGGER
-  const gridModal = document.getElementById('grid-modal');
-  const btnOpenModal = document.getElementById('btn-open-grid-modal');
-  const btnCloseModal = document.getElementById('btn-close-modal');
-  const btnCancelModal = document.getElementById('btn-cancel-modal');
-  const btnSubmitGrid = document.getElementById('btn-submit-grid');
-  const centerSelect = document.getElementById('input-center-type');
-  const customCoordsGroup = document.getElementById('custom-coords-group');
-  const alertBox = document.getElementById('mission-alert-box');
-
-  btnOpenModal.addEventListener('click', () => {
-    gridModal.classList.remove('hidden');
-    alertBox.classList.add('hidden');
+  // 5. AUTONOMOUS MISSION PLANNER & MODAL LOGIC
+  el.btnOpenModal.addEventListener('click', () => {
+    el.gridModal.classList.remove('hidden');
+    el.alertBox.classList.add('hidden');
+    previewMissionRoute();
   });
 
-  const closeModal = () => gridModal.classList.add('hidden');
-  btnCloseModal.addEventListener('click', closeModal);
-  btnCancelModal.addEventListener('click', closeModal);
+  const closeModal = () => {
+    el.gridModal.classList.add('hidden');
+    togglePickMode(false);
+  };
+  el.btnCloseModal.addEventListener('click', closeModal);
+  el.btnCancelModal.addEventListener('click', closeModal);
 
-  centerSelect.addEventListener('change', () => {
-    if (centerSelect.value === 'custom') {
-      customCoordsGroup.classList.remove('hidden');
-    } else {
-      customCoordsGroup.classList.add('hidden');
-    }
+  // Radius slider live update
+  el.radiusSlider.addEventListener('input', () => {
+    const r = parseFloat(el.radiusSlider.value) || 50;
+    el.radiusLabel.textContent = r;
+    searchRadiusCircle.setRadius(r);
+  });
+  el.radiusSlider.addEventListener('change', () => previewMissionRoute());
+
+  // Input changes trigger route preview
+  [el.inputSpacing, el.inputAngle, el.inputAltitude, el.inputSpeed, el.inputEndAction].forEach(elem => {
+    elem.addEventListener('change', () => previewMissionRoute());
   });
 
-  btnSubmitGrid.addEventListener('click', async () => {
-    const radius = parseFloat(document.getElementById('input-radius').value) || 50;
-    const altitude = parseFloat(document.getElementById('input-altitude').value) || 15;
-    const spacing = parseFloat(document.getElementById('input-spacing').value) || 10;
+  // Pattern radio selection
+  document.querySelectorAll('input[name="mission-pattern"]').forEach(radio => {
+    radio.addEventListener('change', () => previewMissionRoute());
+  });
 
-    let lat = null;
-    let lon = null;
-    if (centerSelect.value === 'custom') {
-      lat = parseFloat(document.getElementById('input-custom-lat').value);
-      lon = parseFloat(document.getElementById('input-custom-lon').value);
+  // Center mode radio selection
+  document.querySelectorAll('input[name="center-mode"]').forEach(radio => {
+    radio.addEventListener('change', (e) => {
+      const mode = e.target.value;
+      if (mode === 'current') {
+        const droneLat = currentTelemetry.latitude || 12.971598;
+        const droneLon = currentTelemetry.longitude || 77.594562;
+        setSearchCenter(droneLat, droneLon);
+        previewMissionRoute();
+      } else if (mode === 'map') {
+        togglePickMode(true);
+      }
+    });
+  });
+
+  function getSelectedMissionParams() {
+    const pattern = document.querySelector('input[name="mission-pattern"]:checked')?.value || 'grid';
+    const radius = parseFloat(el.radiusSlider.value) || 50;
+    const spacing = parseFloat(el.inputSpacing.value) || 10;
+    const angle = parseFloat(el.inputAngle.value) || 0;
+    const altitude = parseFloat(el.inputAltitude.value) || 15;
+    const speed = parseFloat(el.inputSpeed.value) || 5;
+    const end_action = el.inputEndAction.value || 'RTL';
+
+    let lat = selectedCenter[0];
+    let lon = selectedCenter[1];
+
+    const centerMode = document.querySelector('input[name="center-mode"]:checked')?.value || 'current';
+    if (centerMode === 'custom') {
+      lat = parseFloat(el.inputCustomLat.value) || lat;
+      lon = parseFloat(el.inputCustomLon.value) || lon;
     }
 
-    alertBox.className = 'alert-box';
-    alertBox.textContent = 'Uploading mission to Pixhawk...';
-    alertBox.classList.remove('hidden');
+    return { lat, lon, radius, spacing, angle, altitude, speed, pattern, end_action };
+  }
 
+  // 6. ROUTE PREVIEW ON MAP
+  async function previewMissionRoute() {
+    const params = getSelectedMissionParams();
     try {
-      const res = await fetch('/api/mission/grid_search', {
+      const res = await fetch('/api/mission/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ radius, altitude, spacing, lat, lon })
+        body: JSON.stringify(params)
+      });
+      const data = await res.json();
+      if (data && data.waypoints) {
+        renderMissionOnMap(data);
+        el.statWpCount.textContent = `${data.waypoint_count} WPs`;
+        el.statTotalDist.textContent = `${data.total_distance_m} m`;
+        const mins = Math.floor(data.estimated_duration_s / 60);
+        const secs = Math.floor(data.estimated_duration_s % 60);
+        el.statEstTime.textContent = `${mins}m ${secs.toString().padStart(2, '0')}s`;
+      }
+    } catch (e) {
+      console.error('Preview failed:', e);
+    }
+  }
+
+  function renderMissionOnMap(plan) {
+    missionLayerGroup.clearLayers();
+    activeWpMarkers = [];
+
+    const waypoints = plan.waypoints || [];
+    if (waypoints.length === 0) return;
+
+    // Draw waypoints & markers
+    const latLngs = waypoints.map(wp => [wp[0], wp[1]]);
+
+    // Path Polyline
+    missionRoutePolyline = L.polyline(latLngs, {
+      color: '#ffd000',
+      weight: 2.5,
+      dashArray: '6, 6',
+      opacity: 0.9
+    }).addTo(missionLayerGroup);
+
+    waypoints.forEach((wp, idx) => {
+      const wpIcon = L.divIcon({
+        className: 'wp-marker-icon',
+        html: `<span>${idx + 1}</span>`,
+        iconSize: [22, 22],
+        iconAnchor: [11, 11]
+      });
+      const marker = L.marker([wp[0], wp[1]], { icon: wpIcon })
+        .bindPopup(`<b>Waypoint ${idx + 1}</b><br>Alt: ${wp[2]}m AGL<br>Lat: ${wp[0].toFixed(6)}<br>Lon: ${wp[1].toFixed(6)}`)
+        .addTo(missionLayerGroup);
+      activeWpMarkers.push(marker);
+    });
+
+    // Takeoff Dynamic Point Marker
+    const takeoffIcon = L.divIcon({
+      className: 'takeoff-marker-icon',
+      html: '<span>🛫</span>',
+      iconSize: [26, 26],
+      iconAnchor: [13, 13]
+    });
+    L.marker([plan.center[0], plan.center[1]], { icon: takeoffIcon })
+      .bindPopup(`<b>Vertical Takeoff Target Datum</b><br>Ascends to ${plan.altitude_m}m AGL before cruising to WP 1`)
+      .addTo(missionLayerGroup);
+  }
+
+  el.btnPreviewMission.addEventListener('click', previewMissionRoute);
+
+  // 7. UPLOAD & MISSION CONTROL ACTIONS
+  el.btnSubmitGrid.addEventListener('click', async () => {
+    const params = getSelectedMissionParams();
+    el.alertBox.className = 'alert-box';
+    el.alertBox.textContent = 'Uploading mission to Pixhawk via MAVLink...';
+    el.alertBox.classList.remove('hidden');
+
+    try {
+      const res = await fetch('/api/mission/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params)
       });
       const resData = await res.json();
       if (res.ok && resData.status === 'success') {
-        alertBox.className = 'alert-box success';
-        alertBox.textContent = `✓ Mission Uploaded! Generated ${resData.waypoints_generated} grid waypoints.`;
-        setTimeout(closeModal, 2000);
+        el.alertBox.className = 'alert-box success';
+        el.alertBox.textContent = `✓ Mission Uploaded! Generated ${resData.plan?.waypoint_count || '--'} waypoints with dynamic vertical takeoff. Ready to arm!`;
+        if (resData.plan) renderMissionOnMap(resData.plan);
       } else {
-        alertBox.className = 'alert-box error';
-        alertBox.textContent = `Upload failed: ${resData.message || 'Error'}`;
+        el.alertBox.className = 'alert-box error';
+        el.alertBox.textContent = `Upload failed: ${resData.message || 'Error'}`;
       }
     } catch (e) {
-      alertBox.className = 'alert-box error';
-      alertBox.textContent = `Network error: ${e.message}`;
+      el.alertBox.className = 'alert-box error';
+      el.alertBox.textContent = `Network error: ${e.message}`;
     }
   });
 
-  // 6. WEBSOCKET & SSE CONNECTION
+  const sendMissionCmd = async (endpoint, payload = {}) => {
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      return await res.json();
+    } catch (e) {
+      console.error(e);
+      return { status: 'error', message: e.message };
+    }
+  };
+
+  el.btnModalStart.addEventListener('click', async () => {
+    const r = await sendMissionCmd('/api/mission/start', { auto_arm: true });
+    if (r.status === 'success') {
+      el.alertBox.className = 'alert-box success';
+      el.alertBox.textContent = '🚀 Pixhawk commanded to AUTO mode! Autonomous mission started.';
+      setTimeout(closeModal, 1500);
+    }
+  });
+  el.btnHudStart.addEventListener('click', () => sendMissionCmd('/api/mission/start', { auto_arm: true }));
+
+  el.btnModalPause.addEventListener('click', () => sendMissionCmd('/api/mission/pause'));
+  el.btnHudPause.addEventListener('click', () => sendMissionCmd('/api/mission/pause'));
+
+  el.btnModalAbort.addEventListener('click', () => sendMissionCmd('/api/mission/abort'));
+  el.btnHudRtl.addEventListener('click', () => sendMissionCmd('/api/mission/abort'));
+
+  el.btnModalClear.addEventListener('click', async () => {
+    await sendMissionCmd('/api/mission/clear');
+    missionLayerGroup.clearLayers();
+    activeWpMarkers = [];
+    el.alertBox.className = 'alert-box';
+    el.alertBox.textContent = 'Mission cleared from Pixhawk memory.';
+  });
+
+  // 8. WEBSOCKET & SSE CONNECTION
   let lastRxTimestamp = Date.now();
 
   function connectWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/telemetry`;
 
-    ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
       el.connText.textContent = 'PIXHAWK LIVE';
@@ -403,9 +656,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     };
 
-    ws.onerror = () => {
-      ws.close();
-    };
+    ws.onerror = () => ws.close();
 
     ws.onclose = () => {
       el.connText.textContent = 'NO HEARTBEAT (>10s)';
@@ -415,16 +666,14 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   setInterval(async () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      try {
-        const res = await fetch('/api/telemetry');
-        if (res.ok) {
-          lastRxTimestamp = Date.now();
-          const data = await res.json();
-          updateTelemetry(data);
-        }
-      } catch (e) {}
-    }
+    try {
+      const res = await fetch('/api/telemetry');
+      if (res.ok) {
+        lastRxTimestamp = Date.now();
+        const data = await res.json();
+        updateTelemetry(data);
+      }
+    } catch (e) {}
   }, 500);
 
   // 10-Second Heartbeat Watchdog
@@ -439,3 +688,4 @@ document.addEventListener('DOMContentLoaded', () => {
 
   connectWebSocket();
 });
+

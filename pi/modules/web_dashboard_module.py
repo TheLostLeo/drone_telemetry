@@ -130,7 +130,7 @@ class WebDashboardModule:
                     return
 
                 # Mission Status
-                if clean_path == "/api/mission/grid_search" and parent.grid_module:
+                if clean_path in ("/api/mission/status", "/api/mission/grid_search") and parent.grid_module:
                     payload = json.dumps(parent.grid_module.get_status())
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
@@ -166,31 +166,99 @@ class WebDashboardModule:
 
             def do_POST(self):
                 clean_path = self.path.split("?")[0]
-                if clean_path == "/api/mission/grid_search" and parent.grid_module:
-                    try:
-                        content_len = int(self.headers.get("Content-Length", 0))
-                        body = self.rfile.read(content_len).decode("utf-8")
-                        params = json.loads(body) if body else {}
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_len).decode("utf-8") if content_len > 0 else "{}"
+                params = json.loads(body) if body else {}
 
-                        res = parent.grid_module.trigger_grid_search(
-                            lat=params.get("lat"),
-                            lon=params.get("lon"),
-                            radius_m=params.get("radius", 50.0),
-                            altitude_m=params.get("altitude", 15.0),
-                            spacing_m=params.get("spacing", 10.0),
-                            auto_arm=params.get("auto_arm", False)
-                        )
+                # 1. Mission Preview
+                if clean_path == "/api/mission/preview" and parent.grid_module:
+                    snap = parent.mav_manager.get_telemetry_snapshot() if parent.mav_manager else {}
+                    lat = params.get("lat") if (params.get("lat") is not None and params.get("lat") != 0) else snap.get("latitude", 12.971598)
+                    lon = params.get("lon") if (params.get("lon") is not None and params.get("lon") != 0) else snap.get("longitude", 77.594562)
 
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.send_header("Access-Control-Allow-Origin", "*")
-                        self.end_headers()
-                        self.wfile.write(json.dumps(res).encode("utf-8"))
-                    except Exception as e:
-                        self.send_error(400, f"Error: {e}")
+                    plan = parent.grid_module.plan_mission(
+                        center_lat=lat,
+                        center_lon=lon,
+                        radius_m=float(params.get("radius", 50.0)),
+                        altitude_m=float(params.get("altitude", 15.0)),
+                        spacing_m=float(params.get("spacing", 10.0)),
+                        speed_m_s=float(params.get("speed", 5.0)),
+                        pattern=params.get("pattern", "grid"),
+                        angle_deg=float(params.get("angle", 0.0)),
+                        end_action=params.get("end_action", "RTL")
+                    )
+                    self._send_json(200, plan)
+                    return
+
+                # 2. Mission Upload
+                elif clean_path in ("/api/mission/upload", "/api/mission/grid_search") and parent.grid_module:
+                    res = parent.grid_module.trigger_mission_upload(
+                        lat=params.get("lat"),
+                        lon=params.get("lon"),
+                        radius_m=float(params.get("radius", 50.0)),
+                        altitude_m=float(params.get("altitude", 15.0)),
+                        spacing_m=float(params.get("spacing", 10.0)),
+                        speed_m_s=float(params.get("speed", 5.0)),
+                        pattern=params.get("pattern", "grid"),
+                        angle_deg=float(params.get("angle", 0.0)),
+                        end_action=params.get("end_action", "RTL")
+                    )
+                    self._send_json(200, res)
+                    return
+
+                # 3. Mission Start (AUTO)
+                elif clean_path == "/api/mission/start" and parent.grid_module:
+                    res = parent.grid_module.start_mission(auto_arm=params.get("auto_arm", True))
+                    self._send_json(200, res)
+                    return
+
+                # 4. Mission Pause (LOITER)
+                elif clean_path == "/api/mission/pause" and parent.grid_module:
+                    res = parent.grid_module.pause_mission()
+                    self._send_json(200, res)
+                    return
+
+                # 5. Mission Resume (AUTO)
+                elif clean_path == "/api/mission/resume" and parent.grid_module:
+                    res = parent.grid_module.resume_mission()
+                    self._send_json(200, res)
+                    return
+
+                # 6. Mission Abort (RTL)
+                elif clean_path == "/api/mission/abort" and parent.grid_module:
+                    res = parent.grid_module.abort_mission()
+                    self._send_json(200, res)
+                    return
+
+                # 7. Mission Clear
+                elif clean_path == "/api/mission/clear" and parent.grid_module:
+                    res = parent.grid_module.clear_mission()
+                    self._send_json(200, res)
+                    return
+
+                # 8. Flight Mode Change
+                elif clean_path == "/api/mode" and parent.mav_manager:
+                    mode = params.get("mode", "STABILIZE")
+                    success = parent.mav_manager.set_flight_mode(mode)
+                    self._send_json(200, {"status": "success" if success else "error", "mode": mode})
+                    return
+
+                # 9. Arm/Disarm
+                elif clean_path == "/api/arm" and parent.mav_manager:
+                    arm = params.get("arm", True)
+                    success = parent.mav_manager.set_arm(arm)
+                    self._send_json(200, {"status": "success" if success else "error", "armed": arm})
                     return
 
                 self.send_error(404, "Endpoint not found.")
+
+            def _send_json(self, status_code: int, data: dict):
+                payload = json.dumps(data)
+                self.send_response(status_code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(payload.encode("utf-8"))
 
             def handle_websocket(self):
                 key = self.headers.get("Sec-WebSocket-Key")

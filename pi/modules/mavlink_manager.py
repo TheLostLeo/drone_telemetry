@@ -30,8 +30,16 @@ class MAVLinkManager:
         self.thread = None
         self.mav = None
         self._lock = threading.Lock()
+        self._serial_cmd_lock = threading.Lock()
 
-        # Telemetry State Store (All 11 Categories)
+        # Simulation mission playback storage
+        self.sim_mission_items: List[Dict[str, Any]] = []
+        self.sim_mission_index: int = 0
+        self.sim_current_lat: float = 12.971598
+        self.sim_current_lon: float = 77.594562
+        self.sim_current_alt: float = 0.0
+
+        # Telemetry State Store (All 11 Categories + Mission Autonomy)
         self.state: Dict[str, Any] = {
             # 1. Total Battery & Power
             "battery_voltage": 0.0,
@@ -62,12 +70,17 @@ class MAVLinkManager:
             "heading": 0.0,
             "compass_status": "CALIBRATED",
             
-            # 7. Flight Status & Mission State
+            # 7. Flight Status & Mission Autonomy State
             "armed": False,
             "flight_mode": "DISCONNECTED",
             "system_status": "STANDBY",
             "mission_state": "STANDBY",
             "mission_progress_percent": 0,
+            "mission_current_seq": 0,
+            "mission_total_items": 0,
+            "dist_to_target_wp_m": 0.0,
+            "target_wp_lat": 0.0,
+            "target_wp_lon": 0.0,
             
             # 8. 3-Axis Gyroscope & Accelerometer Rates
             "gyro_x": 0.0,
@@ -119,6 +132,189 @@ class MAVLinkManager:
         """Thread-safe copy of latest telemetry."""
         with self._lock:
             return dict(self.state)
+
+    # ----------------------------------------------------------------------------------
+    # MAVLINK COMMAND & MISSION METHODS
+    # ----------------------------------------------------------------------------------
+
+    def set_flight_mode(self, mode: str) -> bool:
+        """Commands Pixhawk into requested flight mode (e.g. AUTO, LOITER, RTL, GUIDED)."""
+        mode_upper = mode.upper()
+        if self.simulate or not self.mav:
+            print(f"[✓] Simulation: Flight mode switched to '{mode_upper}'")
+            with self._lock:
+                self.state["flight_mode"] = mode_upper
+                if mode_upper == "AUTO":
+                    self.state["armed"] = True
+                    self.state["mission_state"] = "ACTIVE"
+                    self.sim_mission_index = max(1, self.sim_mission_index)
+                elif mode_upper == "LOITER":
+                    self.state["mission_state"] = "PAUSED (LOITER)"
+                elif mode_upper == "RTL":
+                    self.state["mission_state"] = "RETURNING (RTL)"
+            return True
+
+        with self._serial_cmd_lock:
+            try:
+                from pymavlink import mavutil
+                target_sys = getattr(self.mav, "target_system", 1) or 1
+                mode_map = self.mav.mode_mapping()
+                if mode_map and mode_upper in mode_map:
+                    mode_id = mode_map[mode_upper]
+                    self.mav.set_mode(mode_id)
+                    with self._lock:
+                        self.state["flight_mode"] = mode_upper
+                    return True
+                else:
+                    custom_num = {
+                        "STABILIZE": 0, "ACRO": 1, "ALT_HOLD": 2, "AUTO": 3,
+                        "GUIDED": 4, "LOITER": 5, "RTL": 6, "CIRCLE": 7,
+                        "LAND": 9, "POSHOLD": 16, "BRAKE": 17
+                    }.get(mode_upper, 0)
+                    self.mav.mav.command_long_send(
+                        target_sys, 1,
+                        mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                        0,
+                        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                        custom_num,
+                        0, 0, 0, 0, 0
+                    )
+                    with self._lock:
+                        self.state["flight_mode"] = mode_upper
+                    return True
+            except Exception as e:
+                print(f"[!] Failed to set flight mode {mode}: {e}")
+                return False
+
+    def set_arm(self, arm: bool = True, force: bool = False) -> bool:
+        """Arms or disarms the motors."""
+        if self.simulate or not self.mav:
+            print(f"[✓] Simulation: Motors {'ARMED' if arm else 'DISARMED'}")
+            with self._lock:
+                self.state["armed"] = arm
+            return True
+
+        with self._serial_cmd_lock:
+            try:
+                from pymavlink import mavutil
+                target_sys = getattr(self.mav, "target_system", 1) or 1
+                param1 = 1 if arm else 0
+                param2 = 21196 if force else 0
+                self.mav.mav.command_long_send(
+                    target_sys, 1,
+                    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                    0,
+                    param1, param2, 0, 0, 0, 0, 0
+                )
+                with self._lock:
+                    self.state["armed"] = arm
+                return True
+            except Exception as e:
+                print(f"[!] Arm command failed: {e}")
+                return False
+
+    def clear_all_missions(self) -> bool:
+        """Clears all mission waypoints from flight controller."""
+        if self.simulate or not self.mav:
+            with self._lock:
+                self.sim_mission_items = []
+                self.sim_mission_index = 0
+                self.state["mission_total_items"] = 0
+                self.state["mission_current_seq"] = 0
+                self.state["mission_progress_percent"] = 0
+                self.state["mission_state"] = "STANDBY"
+            return True
+
+        with self._serial_cmd_lock:
+            try:
+                target_sys = getattr(self.mav, "target_system", 1) or 1
+                target_comp = getattr(self.mav, "target_component", 1) or 1
+                self.mav.mav.mission_clear_all_send(target_sys, target_comp)
+                with self._lock:
+                    self.state["mission_total_items"] = 0
+                    self.state["mission_current_seq"] = 0
+                    self.state["mission_progress_percent"] = 0
+                    self.state["mission_state"] = "STANDBY"
+                return True
+            except Exception as e:
+                print(f"[!] Mission clear error: {e}")
+                return False
+
+    def upload_mission_items(self, items: List[Dict[str, Any]]) -> bool:
+        """Thread-safe mission upload to Pixhawk using MAVLink Mission Protocol."""
+        if self.simulate or not self.mav:
+            print(f"[✓] Simulation: Loaded {len(items)} mission items into simulator memory.")
+            with self._lock:
+                self.sim_mission_items = items
+                self.sim_mission_index = 1
+                self.state["mission_total_items"] = len(items)
+                self.state["mission_current_seq"] = 1
+                self.state["mission_progress_percent"] = 0
+                self.state["mission_state"] = "READY (MISSION LOADED)"
+            return True
+
+        with self._serial_cmd_lock:
+            try:
+                from pymavlink import mavutil
+                target_sys = getattr(self.mav, "target_system", 1) or 1
+                target_comp = getattr(self.mav, "target_component", 1) or 1
+
+                # 1. Clear existing mission
+                self.mav.mav.mission_clear_all_send(target_sys, target_comp)
+                time.sleep(0.1)
+
+                # 2. Announce mission count
+                total_count = len(items)
+                self.mav.mav.mission_count_send(target_sys, target_comp, total_count)
+
+                # 3. Transmit mission items upon request
+                start_time = time.time()
+                seq = 0
+                while seq < total_count and (time.time() - start_time < 15.0):
+                    msg = self.mav.recv_match(type=['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK'], blocking=True, timeout=2.0)
+                    if not msg:
+                        continue
+                    if msg.get_type() == 'MISSION_ACK':
+                        if msg.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                            with self._lock:
+                                self.state["mission_total_items"] = total_count
+                                self.state["mission_state"] = "READY (MISSION LOADED)"
+                            return True
+                        else:
+                            print(f"[!] Mission upload rejected with ACK {msg.type}")
+                            return False
+
+                    req_seq = msg.seq
+                    if 0 <= req_seq < total_count:
+                        it = items[req_seq]
+                        self.mav.mav.mission_item_int_send(
+                            target_sys, target_comp,
+                            it.get("seq", req_seq),
+                            it.get("frame", mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT),
+                            it.get("command", mavutil.mavlink.MAV_CMD_NAV_WAYPOINT),
+                            it.get("current", 0),
+                            it.get("autocontinue", 1),
+                            it.get("param1", 0.0),
+                            it.get("param2", 0.0),
+                            it.get("param3", 0.0),
+                            it.get("param4", 0.0),
+                            int(it.get("x", 0)),
+                            int(it.get("y", 0)),
+                            float(it.get("z", 0.0))
+                        )
+                        seq = req_seq + 1
+
+                ack = self.mav.recv_match(type='MISSION_ACK', blocking=True, timeout=3.0)
+                if ack and ack.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                    with self._lock:
+                        self.state["mission_total_items"] = total_count
+                        self.state["mission_state"] = "READY (MISSION LOADED)"
+                    return True
+                return False
+
+            except Exception as e:
+                print(f"[!] Mission upload error: {e}")
+                return False
 
     def _run_loop(self):
         if self.simulate:
@@ -449,6 +645,19 @@ class MAVLinkManager:
                                         self.state["rc_rssi"] = int((msg.rssi / 255.0) * 100)
                                     else:
                                         self.state["rc_rssi"] = 90
+
+                                # 12. MISSION_CURRENT & MISSION_ITEM_REACHED
+                                elif msg_type == 'MISSION_CURRENT':
+                                    self.state["mission_current_seq"] = msg.seq
+                                    tot = self.state.get("mission_total_items", 0)
+                                    if tot > 0:
+                                        self.state["mission_progress_percent"] = min(100, int((msg.seq / float(tot)) * 100))
+                                    self.state["mission_state"] = f"ACTIVE (WP {msg.seq}/{tot})"
+
+                                elif msg_type == 'MISSION_ITEM_REACHED':
+                                    self.state["mission_current_seq"] = msg.seq + 1
+                                    self.state["mission_state"] = f"REACHED WP {msg.seq}"
+
                         except Exception:
                             pass
 
@@ -460,26 +669,135 @@ class MAVLinkManager:
                     break
 
     def _run_simulation(self):
-        """Dynamic simulation loop only used when --simulate flag is explicitly set."""
-        print("[+] Starting high-fidelity telemetry simulator (10 Hz)...")
+        """Dynamic simulation loop supporting both manual flight and autonomous mission execution."""
+        print("[+] Starting high-fidelity telemetry & mission autonomy simulator (10 Hz)...")
         t = 0.0
         base_lat = 12.971598
         base_lon = 77.594562
         base_voltage = 12.58
 
+        self.sim_current_lat = base_lat
+        self.sim_current_lon = base_lon
+        self.sim_current_alt = 0.0
+        self.sim_mission_index = 1
+
+        EARTH_R = 6378137.0
+
         while self.running:
             time.sleep(0.1)
             t += 0.1
 
-            sim_alt = round(max(0.0, 15.0 + 3.0 * math.sin(t * 0.2)), 1)
-            sim_lat = round(base_lat + 0.0004 * math.sin(t * 0.1), 7)
-            sim_lon = round(base_lon + 0.0004 * math.cos(t * 0.1), 7)
-            sim_heading = round((t * 12.0) % 360, 1)
+            is_auto = (self.state.get("flight_mode") == "AUTO")
+            has_mission = len(self.sim_mission_items) > 0
 
-            roll_target = round(3.5 * math.sin(t * 0.8), 2)
-            pitch_target = round(2.0 * math.cos(t * 0.5), 2)
-            roll_actual = round(roll_target + 0.3 * math.sin(t * 3.0), 2)
-            pitch_actual = round(pitch_target + 0.2 * math.cos(t * 3.5), 2)
+            # Default parameters
+            sim_lat = self.sim_current_lat
+            sim_lon = self.sim_current_lon
+            sim_alt = self.sim_current_alt
+            sim_heading = self.state.get("heading", 0.0)
+            roll_actual = 0.0
+            pitch_actual = 0.0
+            climb_rate = 0.0
+            mission_state = self.state.get("mission_state", "STANDBY")
+            progress_pct = self.state.get("mission_progress_percent", 0)
+
+            # --- AUTONOMOUS MISSION FLIGHT SIMULATOR ---
+            if is_auto and has_mission and self.sim_mission_index < len(self.sim_mission_items):
+                item = self.sim_mission_items[self.sim_mission_index]
+                cmd = item.get("command", 16)
+                total_wps = len(self.sim_mission_items)
+                progress_pct = min(100, int((self.sim_mission_index / float(total_wps)) * 100))
+
+                # 1. Takeoff Command (MAV_CMD_NAV_TAKEOFF = 22)
+                if cmd == 22:
+                    target_alt = item.get("z", 15.0)
+                    if sim_alt < target_alt - 0.2:
+                        sim_alt += 0.4 # Climb at 4 m/s
+                        climb_rate = 4.0
+                        pitch_actual = 1.5
+                        mission_state = f"TAKEOFF ({sim_alt:.1f}m / {target_alt:.0f}m)"
+                    else:
+                        sim_alt = target_alt
+                        climb_rate = 0.0
+                        self.sim_mission_index += 1
+                        mission_state = f"CRUISE -> WP 1"
+
+                # 2. Speed Command (MAV_CMD_DO_CHANGE_SPEED = 178)
+                elif cmd == 178:
+                    self.sim_mission_index += 1
+
+                # 3. Waypoint Command (MAV_CMD_NAV_WAYPOINT = 16)
+                elif cmd == 16:
+                    target_lat = item.get("x", 0) / 1e7
+                    target_lon = item.get("y", 0) / 1e7
+                    target_alt = item.get("z", 15.0)
+
+                    # Calculate distance and bearing to waypoint
+                    dlat = (target_lat - sim_lat) * (math.pi / 180.0) * EARTH_R
+                    dlon = (target_lon - sim_lon) * (math.pi / 180.0) * EARTH_R * math.cos(math.radians(sim_lat))
+                    dist = math.sqrt(dlat**2 + dlon**2)
+
+                    target_bearing = (math.degrees(math.atan2(dlon, dlat)) + 360.0) % 360.0
+                    heading_err = (target_bearing - sim_heading + 180.0) % 360.0 - 180.0
+                    sim_heading = (sim_heading + min(max(heading_err * 0.3, -12.0), 12.0)) % 360.0
+
+                    roll_actual = round(min(max(heading_err * 0.5, -20.0), 20.0), 2)
+                    pitch_actual = -3.5 # Forward acceleration pitch
+
+                    # Step towards target at 5.0 m/s (0.5m per 0.1s tick)
+                    step_m = min(0.5, dist)
+                    if dist > 0.01:
+                        sim_lat += (dlat / dist) * (step_m / EARTH_R) * (180.0 / math.pi)
+                        sim_lon += (dlon / dist) * (step_m / (EARTH_R * math.cos(math.radians(sim_lat)))) * (180.0 / math.pi)
+
+                    mission_state = f"NAV WP {self.sim_mission_index}/{total_wps - 1} ({dist:.1f}m)"
+
+                    # Reached Waypoint Acceptance Radius (2.0m)
+                    if dist <= 2.0:
+                        self.sim_mission_index += 1
+
+                # 4. Return to Launch / Land (MAV_CMD_NAV_RETURN_TO_LAUNCH = 20, MAV_CMD_NAV_LAND = 21)
+                elif cmd in (20, 21):
+                    dlat = (base_lat - sim_lat) * (math.pi / 180.0) * EARTH_R
+                    dlon = (base_lon - sim_lon) * (math.pi / 180.0) * EARTH_R * math.cos(math.radians(sim_lat))
+                    dist = math.sqrt(dlat**2 + dlon**2)
+
+                    if dist > 2.0:
+                        target_bearing = (math.degrees(math.atan2(dlon, dlat)) + 360.0) % 360.0
+                        sim_heading = target_bearing
+                        step_m = min(0.5, dist)
+                        sim_lat += (dlat / dist) * (step_m / EARTH_R) * (180.0 / math.pi)
+                        sim_lon += (dlon / dist) * (step_m / (EARTH_R * math.cos(math.radians(sim_lat)))) * (180.0 / math.pi)
+                        mission_state = f"RTL RETURN ({dist:.1f}m)"
+                    else:
+                        if sim_alt > 0.3:
+                            sim_alt -= 0.3 # Descend at 3 m/s
+                            climb_rate = -3.0
+                            mission_state = f"RTL LANDING ({sim_alt:.1f}m)"
+                        else:
+                            sim_alt = 0.0
+                            climb_rate = 0.0
+                            self.sim_mission_index += 1
+                            mission_state = "MISSION COMPLETED"
+                            self.state["flight_mode"] = "STABILIZE"
+                            self.state["armed"] = False
+
+                self.sim_current_lat = sim_lat
+                self.sim_current_lon = sim_lon
+                self.sim_current_alt = sim_alt
+
+            elif is_auto and has_mission and self.sim_mission_index >= len(self.sim_mission_items):
+                mission_state = "MISSION COMPLETED"
+                progress_pct = 100
+
+            else:
+                # Normal Loiter / Telemetry Simulation Mode
+                sim_alt = round(max(0.0, 15.0 + 3.0 * math.sin(t * 0.2)), 1)
+                sim_lat = round(base_lat + 0.0004 * math.sin(t * 0.1), 7)
+                sim_lon = round(base_lon + 0.0004 * math.cos(t * 0.1), 7)
+                sim_heading = round((t * 12.0) % 360, 1)
+                roll_actual = round(3.5 * math.sin(t * 0.8), 2)
+                pitch_actual = round(2.0 * math.cos(t * 0.5), 2)
 
             gyro_x = round(5.0 * math.cos(t * 1.5), 2)
             gyro_y = round(4.0 * math.sin(t * 1.2), 2)
@@ -508,22 +826,21 @@ class MAVLinkManager:
                     "battery_remaining": max(10, int(88 - (t * 0.05))),
                     "cell_voltages": [c1, c2, c3, 0.0, 0.0, 0.0],
                     "cell_delta_mv": cell_delta,
-                    "altitude_relative": sim_alt,
+                    "altitude_relative": round(sim_alt, 1),
                     "altitude_msl": round(sim_alt + 920.0, 1),
-                    "climb_rate": round(0.6 * math.cos(t * 0.2), 2),
-                    "latitude": sim_lat,
-                    "longitude": sim_lon,
+                    "climb_rate": round(climb_rate, 1),
+                    "latitude": round(sim_lat, 7),
+                    "longitude": round(sim_lon, 7),
                     "satellites": 16,
                     "gps_fix_type": "3D FIX",
                     "hdop": 0.85,
                     "rc_rssi": int(92 + 5 * math.sin(t * 0.1)),
                     "radio_link_quality": 98,
-                    "heading": sim_heading,
-                    "armed": True,
-                    "flight_mode": "GUIDED",
-                    "system_status": "ACTIVE",
-                    "mission_state": "SEARCHING (LANE 2/5)",
-                    "mission_progress_percent": int((t * 2.0) % 100),
+                    "heading": round(sim_heading, 1),
+                    "mission_state": mission_state,
+                    "mission_progress_percent": progress_pct,
+                    "mission_current_seq": self.sim_mission_index,
+                    "mission_total_items": len(self.sim_mission_items),
                     "gyro_x": gyro_x,
                     "gyro_y": gyro_y,
                     "gyro_z": gyro_z,
@@ -532,12 +849,12 @@ class MAVLinkManager:
                     "accel_z": accel_z,
                     "attitude_roll": roll_actual,
                     "attitude_pitch": pitch_actual,
-                    "attitude_yaw": sim_heading,
-                    "target_roll": roll_target,
-                    "target_pitch": pitch_target,
-                    "target_yaw": sim_heading,
-                    "error_roll": round(roll_target - roll_actual, 2),
-                    "error_pitch": round(pitch_target - pitch_actual, 2),
+                    "attitude_yaw": round(sim_heading, 1),
+                    "target_roll": 0.0,
+                    "target_pitch": 0.0,
+                    "target_yaw": round(sim_heading, 1),
+                    "error_roll": round(-roll_actual, 2),
+                    "error_pitch": round(-pitch_actual, 2),
                     "motor_pwm": [m1, m2, m3, m4],
                     "motor_percent": [int((m - 1000) / 10.0) for m in [m1, m2, m3, m4]],
                     "last_packet_timestamp": time.time(),

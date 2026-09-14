@@ -116,7 +116,7 @@
         <div class="card-header flex-between">
           <div class="header-title-group">
             <span class="card-icon">🗺️</span>
-            <span class="card-title">LIVE GPS SATELLITE TRACKING & SEARCH GRID</span>
+            <span class="card-title">LIVE GPS SATELLITE TRACKING & AUTONOMOUS MISSION PLANNER</span>
           </div>
           <div class="gps-meta-badges">
             <span class="gps-badge" id="badge-gps-fix">3D FIX</span>
@@ -125,8 +125,36 @@
           </div>
         </div>
         
-        <!-- Leaflet Map Container -->
-        <div id="leaflet-map" class="map-view"></div>
+        <!-- Leaflet Map Container & Floating Mission HUD -->
+        <div class="map-view-wrapper">
+          <div id="leaflet-map" class="map-view"></div>
+          
+          <!-- Floating Live Mission HUD Overlay on Map -->
+          <div class="mission-map-hud" id="mission-map-hud">
+            <div class="hud-header">
+              <span class="hud-dot" id="hud-dot"></span>
+              <span class="hud-title" id="hud-mission-state">MISSION: STANDBY</span>
+            </div>
+            <div class="hud-body">
+              <div class="hud-row">
+                <span>Waypoint:</span>
+                <b id="hud-wp-tracker">-- / --</b>
+              </div>
+              <div class="hud-row">
+                <span>Distance to WP:</span>
+                <b id="hud-wp-dist">--.- m</b>
+              </div>
+              <div class="hud-progress-bg">
+                <div class="hud-progress-fill" id="hud-progress-fill" style="width: 0%"></div>
+              </div>
+              <div class="hud-quick-actions">
+                <button class="hud-btn hud-btn-start" id="btn-hud-start" title="Start Mission in AUTO">▶️ AUTO</button>
+                <button class="hud-btn hud-btn-pause" id="btn-hud-pause" title="Pause in LOITER">⏸️ LOITER</button>
+                <button class="hud-btn hud-btn-rtl" id="btn-hud-rtl" title="Return to Launch">🚨 RTL</button>
+              </div>
+            </div>
+          </div>
+        </div>
 
         <div class="map-bottom-bar">
           <div class="coord-display">
@@ -134,8 +162,9 @@
             <span>LON: <b id="val-lon">--.------</b></span>
           </div>
           <div class="map-controls">
+            <button class="btn btn-secondary" id="btn-pick-center">📍 Pick Center on Map</button>
             <button class="btn btn-secondary" id="btn-recenter">🎯 Recenter</button>
-            <button class="btn btn-primary" id="btn-open-grid-modal">🚀 Start Grid Search</button>
+            <button class="btn btn-primary" id="btn-open-grid-modal">🚀 Mission Planner & Autonomy</button>
           </div>
         </div>
       </div>
@@ -296,48 +325,163 @@
       </div>
     </main>
 
-    <!-- GRID SEARCH MODAL -->
+    <!-- AUTONOMOUS MISSION PLANNER MODAL -->
     <div id="grid-modal" class="modal-overlay hidden">
-      <div class="modal-card">
+      <div class="modal-card modal-large">
         <div class="modal-header">
-          <h2>🗺️ Automated Grid Search Mission Generator</h2>
+          <div class="modal-title-group">
+            <span class="modal-icon">🛸</span>
+            <div>
+              <h2>Autonomous Mission Planner & Grid Generator</h2>
+              <div class="modal-sub">Dynamic Point & Radius Autonomy with Vertical Launch (lat=0, lon=0)</div>
+            </div>
+          </div>
           <button class="btn-close" id="btn-close-modal">&times;</button>
         </div>
-        <div class="modal-body">
-          <div class="form-group">
-            <label>Search Radius (meters):</label>
-            <input type="number" id="input-radius" value="50" min="10" max="500">
-          </div>
-          <div class="form-group">
-            <label>Flight Altitude (meters AGL):</label>
-            <input type="number" id="input-altitude" value="15" min="5" max="100">
-          </div>
-          <div class="form-group">
-            <label>Lane Spacing / Sweep (meters):</label>
-            <input type="number" id="input-spacing" value="10" min="4" max="50">
-          </div>
-          <div class="form-group">
-            <label>Center Point:</label>
-            <select id="input-center-type">
-              <option value="current">Current Drone GPS Location</option>
-              <option value="custom">Custom Lat / Lon Coordinates</option>
-            </select>
-          </div>
-          <div id="custom-coords-group" class="hidden">
-            <div class="form-group">
-              <label>Center Latitude:</label>
-              <input type="text" id="input-custom-lat" placeholder="12.971598">
+
+        <div class="modal-body modal-grid-layout">
+          <!-- LEFT COLUMN: INPUT CONTROLS -->
+          <div class="modal-inputs-col">
+            <!-- 1. Search Pattern Selection -->
+            <div class="section-label">1. SEARCH PATTERN</div>
+            <div class="pattern-selector">
+              <label class="pattern-option">
+                <input type="radio" name="mission-pattern" value="grid" checked>
+                <div class="pattern-card">
+                  <span class="pattern-icon">🌾</span>
+                  <span class="pattern-name">Lawnmower Grid</span>
+                  <span class="pattern-desc">Boustrophedon Serpentine</span>
+                </div>
+              </label>
+              <label class="pattern-option">
+                <input type="radio" name="mission-pattern" value="spiral">
+                <div class="pattern-card">
+                  <span class="pattern-icon">🌀</span>
+                  <span class="pattern-name">Expanding Spiral</span>
+                  <span class="pattern-desc">Outward Box SAR</span>
+                </div>
+              </label>
+              <label class="pattern-option">
+                <input type="radio" name="mission-pattern" value="sector">
+                <div class="pattern-card">
+                  <span class="pattern-icon">🍕</span>
+                  <span class="pattern-name">Sector Search</span>
+                  <span class="pattern-desc">120° Radiating Transects</span>
+                </div>
+              </label>
             </div>
+
+            <!-- 2. Target Center Location -->
+            <div class="section-label">2. TARGET CENTER POINT</div>
             <div class="form-group">
-              <label>Center Longitude:</label>
-              <input type="text" id="input-custom-lon" placeholder="77.594562">
+              <div class="radio-pill-group">
+                <label><input type="radio" name="center-mode" value="current" checked> 🛸 Current GPS</label>
+                <label><input type="radio" name="center-mode" value="map"> 📍 Click on Map</label>
+                <label><input type="radio" name="center-mode" value="custom"> ✏️ Manual Lat/Lon</label>
+              </div>
+            </div>
+
+            <div id="custom-coords-group" class="form-row-2">
+              <div class="form-group">
+                <label>Latitude:</label>
+                <input type="number" step="0.000001" id="input-custom-lat" value="12.971598">
+              </div>
+              <div class="form-group">
+                <label>Longitude:</label>
+                <input type="number" step="0.000001" id="input-custom-lon" value="77.594562">
+              </div>
+            </div>
+
+            <!-- 3. Search Radius Slider -->
+            <div class="section-label">3. SEARCH RADIUS & SPACING</div>
+            <div class="form-group">
+              <div class="slider-header">
+                <label>Search Radius:</label>
+                <span class="slider-val-badge"><b id="val-radius-label">50</b> meters</span>
+              </div>
+              <input type="range" id="input-radius-slider" min="10" max="500" step="5" value="50" class="styled-slider">
+            </div>
+
+            <div class="form-row-2">
+              <div class="form-group">
+                <label>Lane Spacing / Sweep (m):</label>
+                <input type="number" id="input-spacing" value="10" min="4" max="50">
+              </div>
+              <div class="form-group">
+                <label>Grid Angle (° Rotation):</label>
+                <input type="number" id="input-angle" value="0" min="0" max="360" step="5">
+              </div>
+            </div>
+
+            <!-- 4. Flight Dynamics & Safety -->
+            <div class="section-label">4. FLIGHT DYNAMICS & END ACTION</div>
+            <div class="form-row-3">
+              <div class="form-group">
+                <label>Altitude (m AGL):</label>
+                <input type="number" id="input-altitude" value="15" min="5" max="100">
+              </div>
+              <div class="form-group">
+                <label>Speed (m/s):</label>
+                <input type="number" id="input-speed" value="5" min="1" max="15">
+              </div>
+              <div class="form-group">
+                <label>End Action:</label>
+                <select id="input-end-action">
+                  <option value="RTL">Return to Launch (RTL)</option>
+                  <option value="LAND">Land at Last Point</option>
+                  <option value="LOITER">Hold / Loiter in Place</option>
+                </select>
+              </div>
             </div>
           </div>
-          <div id="mission-alert-box" class="alert-box hidden"></div>
+
+          <!-- RIGHT COLUMN: PREVIEW STATS & ACTION HUB -->
+          <div class="modal-preview-col">
+            <div class="section-label">5. ROUTE ANALYTICS & PREVIEW</div>
+            
+            <div class="preview-metrics-card">
+              <div class="preview-stat-item">
+                <span class="stat-label">WAYPOINTS</span>
+                <span class="stat-val" id="stat-wp-count">--</span>
+              </div>
+              <div class="preview-stat-item">
+                <span class="stat-label">TOTAL DISTANCE</span>
+                <span class="stat-val" id="stat-total-dist">-- m</span>
+              </div>
+              <div class="preview-stat-item">
+                <span class="stat-label">EST. FLIGHT TIME</span>
+                <span class="stat-val" id="stat-est-time">--m --s</span>
+              </div>
+              <div class="preview-stat-item">
+                <span class="stat-label">TAKEOFF MODE</span>
+                <span class="stat-val text-green">Dynamic (0,0)</span>
+              </div>
+            </div>
+
+            <div class="takeoff-info-alert">
+              <span class="info-icon">ℹ️</span>
+              <div class="info-text">
+                <b>Dynamic Launch Guarantee:</b> Takeoff command uses <code>(0,0)</code> coordinates with relative altitude. Pixhawk ascends vertically from wherever it sits on the ground before flying to Waypoint 1.
+              </div>
+            </div>
+
+            <div id="mission-alert-box" class="alert-box hidden"></div>
+
+            <div class="modal-actions-container">
+              <button class="btn btn-secondary btn-full" id="btn-preview-mission">👁️ Preview Route on Map</button>
+              <button class="btn btn-primary btn-full" id="btn-submit-grid">🚀 Upload Mission to Pixhawk</button>
+              <div class="modal-sub-actions">
+                <button class="btn btn-success" id="btn-modal-start">▶️ Start Mission (AUTO)</button>
+                <button class="btn btn-warning" id="btn-modal-pause">⏸️ Pause (LOITER)</button>
+                <button class="btn btn-danger" id="btn-modal-abort">🚨 Abort (RTL)</button>
+                <button class="btn btn-secondary" id="btn-modal-clear">🗑️ Clear</button>
+              </div>
+            </div>
+          </div>
         </div>
+
         <div class="modal-footer">
-          <button class="btn btn-secondary" id="btn-cancel-modal">Cancel</button>
-          <button class="btn btn-primary" id="btn-submit-grid">🚀 Generate & Upload to Pixhawk</button>
+          <button class="btn btn-secondary" id="btn-cancel-modal">Close</button>
         </div>
       </div>
     </div>
