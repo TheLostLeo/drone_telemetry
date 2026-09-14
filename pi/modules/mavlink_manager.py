@@ -289,6 +289,13 @@ class MAVLinkManager:
                         last_stream_request_time = now
                         self._request_all_streams(mavutil)
 
+                    # 3. Check for 10-second Heartbeat Loss Timeout
+                    last_pkt = self.state.get("last_packet_timestamp", 0.0)
+                    if self.state.get("connected", False) and last_pkt > 0 and (now - last_pkt > 10.0):
+                        with self._lock:
+                            self.state["connected"] = False
+                            self.state["flight_mode"] = "NO HEARTBEAT"
+
                     # 3. Read incoming packets (drain all pending in buffer)
                     packets_read = 0
                     while packets_read < 50:

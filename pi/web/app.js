@@ -201,7 +201,10 @@ document.addEventListener('DOMContentLoaded', () => {
     el.sbcTemp.textContent = (data.sbc?.cpu_temp_c || 48.0).toFixed(1);
     el.sbcLoad.textContent = Math.round(data.sbc?.cpu_load_percent || 0);
 
-    if (data.armed) {
+    const nowSec = Date.now() / 1000;
+    const isHeartbeatLost = !data.connected || (data.last_packet_timestamp > 0 && (nowSec - data.last_packet_timestamp > 10.0));
+
+    if (data.armed && !isHeartbeatLost) {
       el.badgeArm.textContent = 'ARMED';
       el.badgeArm.className = 'status-badge armed';
     } else {
@@ -209,8 +212,18 @@ document.addEventListener('DOMContentLoaded', () => {
       el.badgeArm.className = 'status-badge disarmed';
     }
 
-    el.badgeMode.textContent = data.flight_mode || 'UNKNOWN';
-    el.badgeMission.textContent = data.mission_state || 'STANDBY';
+    if (isHeartbeatLost) {
+      el.badgeMode.textContent = 'NO HEARTBEAT';
+      el.badgeMode.className = 'status-badge lost';
+      el.connText.textContent = 'NO HEARTBEAT (>10s)';
+      el.connIndicator.className = 'conn-indicator lost';
+    } else {
+      el.badgeMode.textContent = data.flight_mode || 'STABILIZE';
+      el.badgeMode.className = 'status-badge mode-badge';
+      el.connText.textContent = 'PIXHAWK LIVE';
+      el.connIndicator.className = 'conn-indicator online';
+    }
+    el.badgeMission.textContent = isHeartbeatLost ? 'LINK LOST' : (data.mission_state || 'STANDBY');
 
     el.gpsFix.textContent = data.gps_fix_type || '3D FIX';
     el.gpsSats.textContent = `${data.satellites || 0} SATS`;
@@ -367,7 +380,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // 6. WEBSOCKET & SSE CONNECTION
-  let ws = null;
+  let lastRxTimestamp = Date.now();
 
   function connectWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -376,12 +389,13 @@ document.addEventListener('DOMContentLoaded', () => {
     ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-      el.connText.textContent = 'LIVE 10Hz WS';
-      el.connIndicator.classList.add('online');
+      el.connText.textContent = 'PIXHAWK LIVE';
+      el.connIndicator.className = 'conn-indicator online';
     };
 
     ws.onmessage = (event) => {
       try {
+        lastRxTimestamp = Date.now();
         const payload = JSON.parse(event.data);
         updateTelemetry(payload);
       } catch (err) {
@@ -394,8 +408,8 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     ws.onclose = () => {
-      el.connText.textContent = 'CONNECTING...';
-      el.connIndicator.classList.remove('online');
+      el.connText.textContent = 'NO HEARTBEAT (>10s)';
+      el.connIndicator.className = 'conn-indicator lost';
       setTimeout(connectWebSocket, 2000);
     };
   }
@@ -405,14 +419,23 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         const res = await fetch('/api/telemetry');
         if (res.ok) {
+          lastRxTimestamp = Date.now();
           const data = await res.json();
           updateTelemetry(data);
-          el.connText.textContent = 'REST POLLING';
-          el.connIndicator.classList.add('online');
         }
       } catch (e) {}
     }
   }, 500);
+
+  // 10-Second Heartbeat Watchdog
+  setInterval(() => {
+    if (Date.now() - lastRxTimestamp > 10000) {
+      el.badgeMode.textContent = 'NO HEARTBEAT';
+      el.badgeMode.className = 'status-badge lost';
+      el.connText.textContent = 'NO HEARTBEAT (>10s)';
+      el.connIndicator.className = 'conn-indicator lost';
+    }
+  }, 1000);
 
   connectWebSocket();
 });

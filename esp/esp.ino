@@ -92,7 +92,7 @@ bool g_hasReceivedData = false;
 bool g_heartbeatState = false;
 bool g_radioHardwareOk = false;
 unsigned long g_lastPacketTime = 0;
-const unsigned long DISCONNECT_TIMEOUT_MS = 30000; // 30 seconds
+const unsigned long DISCONNECT_TIMEOUT_MS = 10000; // 10 seconds timeout
 
 // Display Refresh Timer
 unsigned long g_lastDisplayRefresh = 0;
