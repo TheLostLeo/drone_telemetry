@@ -107,8 +107,10 @@ def main():
             t = mav_manager.get_telemetry_snapshot()
             sbc = sbc_monitor.get_metrics_snapshot()
             conn_status = "✓ LIVE" if t.get("connected") else "! WAITING"
+            v_bat = t.get('battery_voltage', 0.0)
+            bat_str = f"{v_bat:5.2f}V" if v_bat > 0.5 else "USB 5V"
             print(f"[{conn_status}] Mode: {t.get('flight_mode'):<9} | "
-                  f"Bat: {t.get('battery_voltage', 0.0):5.2f}V | "
+                  f"Bat: {bat_str} | "
                   f"Roll: {t.get('attitude_roll', 0.0):+5.1f}° | "
                   f"Pitch: {t.get('attitude_pitch', 0.0):+5.1f}° | "
                   f"Hdg: {t.get('heading', 0.0):5.1f}° | "

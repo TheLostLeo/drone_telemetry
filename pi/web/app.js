@@ -168,16 +168,21 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateTelemetry(data) {
     currentTelemetry = data;
 
-    const v = (data.battery_voltage || 0).toFixed(2);
+    const rawV = data.battery_voltage || 0;
+    const isUsb = rawV < 0.5;
+    const v = isUsb ? '5.00 (USB)' : rawV.toFixed(2);
     const a = (data.battery_current || 0).toFixed(1);
-    const w = (data.battery_voltage * data.battery_current).toFixed(0);
-    const pct = data.battery_remaining || 0;
+    const w = isUsb ? '0' : (data.battery_voltage * data.battery_current).toFixed(0);
+    const pct = isUsb ? 100 : (data.battery_remaining || 0);
 
     el.batV.textContent = v;
     el.batA.textContent = a;
     el.batW.textContent = w;
-    el.batPct.textContent = pct;
+    el.batPct.textContent = isUsb ? 'USB' : pct;
     el.batBar.style.width = `${pct}%`;
+    if (isUsb) {
+      el.batBar.style.background = 'var(--accent-blue)';
+    }
 
     el.altRel.textContent = (data.altitude_relative || 0).toFixed(1);
     el.altMsl.textContent = (data.altitude_msl || 0).toFixed(1);
