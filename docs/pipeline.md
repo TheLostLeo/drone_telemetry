@@ -1,30 +1,31 @@
-# End-to-End Drone Telemetry Pipeline
+# End-to-End Drone Telemetry & Mission Pipeline
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Pixhawk as Pixhawk 4/Cube Flight Controller
-    participant RPi as Airborne Raspberry Pi (Sender)
-    participant NRF_TX as NRF24L01+ PA+LNA (Air)
-    participant NRF_RX as NRF24L01+ PA+LNA (Ground)
-    participant ESP as ESP-WROOM-32 (Receiver)
-    participant OLED as 1.3" SH1106 OLED Display
+    participant Pixhawk as Pixhawk 2.4.8 (Autopilot)
+    participant Pi_Serial as MAVLinkManager (/dev/serial0)
+    participant SBC_Mon as SBC Monitor (/proc, /sys)
+    participant Hub as Telemetry Server (pi/dashboard_server.py)
+    participant Web as Web Dashboard (Browser ws://)
+    participant Graf as Grafana (/metrics)
+    participant NRF as NRF24L01+ Radio (TX)
+    participant ESP as ESP32 OLED Ground Unit
 
-    Pixhawk->>RPi: MAVLink telemetry stream (TELEM2 / USB Serial)
-    Note over RPi: Reads SYS_STATUS, RC_CHANNELS, GLOBAL_POSITION_INT
-    RPi->>RPi: Packs 20-byte TelemetryPacket (magic 0xAA, scaled integers, XOR checksum)
-    RPi->>NRF_TX: Transmit payload via SPI (Channel 90, 250 kbps)
-    NRF_TX-->>NRF_RX: 2.4 GHz RF Broadcast
-    NRF_RX->>ESP: Payload ready (VSPI FIFO)
-    ESP->>ESP: Check magic byte (0xAA) & validate XOR checksum
-    alt Checksum Valid
-        ESP->>ESP: Scale into engineering units & reset 30s timeout timer
-        ESP->>OLED: Render 3-Level Display (BAT, RSSI, ALT, LAT, LON, Heartbeat)
-    else Checksum Failed
-        ESP->>ESP: Drop corrupted packet
-    end
-
-    opt Signal Inactivity >= 30 seconds
-        ESP->>OLED: Render Fullscreen "! NO CONNECTION !" with elapsed loss timer
+    Pixhawk->>Pi_Serial: MAVLink Stream @ 115200 (TELEM2)
+    Note over Pi_Serial: Decodes 11 categories: Battery, Cells 1-6, Alt, GPS, Gyro, Motors, PID
+    SBC_Mon->>Hub: Ingests Pi CPU Temp, CPU Load, RAM, Disk
+    Pi_Serial->>Hub: Updates Shared State Store (10 Hz)
+    
+    par WebSocket Real-Time Stream (10 Hz)
+        Hub-->>Web: JSON Frame (/ws/telemetry)
+        Note over Web: Updates Leaflet GPS Map, Gyro Chart, PID Chart, Cell Stack, Motor Equalizer
+    and Prometheus Metrics Polling
+        Graf->>Hub: GET /metrics (Prometheus Format)
+        Hub-->>Graf: Returns 11 Panels Time-Series Metrics
+    and Radio RF Broadcast (5 Hz)
+        Hub->>NRF: Packs 20-byte struct (Magic 0xAA, XOR Checksum)
+        NRF-->>ESP: 2.4 GHz RF Broadcast (Channel 90, 250 kbps)
+        ESP->>ESP: Renders 3-Level Display on 1.3" SH1106 OLED
     end
 ```

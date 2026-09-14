@@ -1,23 +1,26 @@
 # System Architecture & Technical Detail
 
-### 1. Hardware Architecture
-The handheld ground receiver unit is composed of an **ESP-WROOM-32** connected to a **1.3" JMD1.3A SH1106 OLED** (I2C) and an **NRF24L01+ PA+LNA** (VSPI) supported by an **HW-200 3.3V adapter base**.
+### 1. Companion Computer Telemetry Hub Architecture
+The drone air unit combines a **Pixhawk 2.4.8** flight controller with a **Raspberry Pi 4B** acting as the onboard companion computer.
+- **Physical Link**: 3-wire UART connection (TX on Pin 10, RX on Pin 8, Ground on Pin 9) connected to Pixhawk's TELEM2 DF13 6-pin socket.
+- **Protocol**: MAVLink2 at 115200 baud.
+- **Single Serial Port Ownership**: `MAVLinkManager` acts as the exclusive thread-safe reader on `/dev/serial0`, preventing byte collisions and parsing all flight telemetry into structured state.
 
-#### Power Routing Rationale
-The NRF24L01+ PA+LNA module draws ~115mA current peaks during active transmit/receive windows. Powering the HW-200 adapter directly from the ESP32's `VIN` (5V pin) utilizes the onboard AMS1117 regulator and bypass capacitors to provide clean, ripple-free 3.3V power, completely eliminating ESP32 brownouts and RF resets.
+### 2. Live Telemetry Metrics (11 Categories)
+The telemetry hub captures and streams:
+1. **Total Battery Voltage & Power**: Voltage (V), Current (A), Remaining (%).
+2. **Individual Cell Voltages**: Cell 1 to 6 voltages in Volts and balance delta ($\Delta V$).
+3. **Altitude Dynamics**: Relative altitude AGL (m), MSL (m), and climb rate (m/s).
+4. **GPS Positioning**: Latitude, Longitude, Satellites count, Fix type (3D/DGPS/RTK), HDOP, and live Leaflet map tracking.
+5. **Signal Strength**: RC link RSSI (%) and radio telemetry quality.
+6. **Heading & Compass**: 360° heading and compass calibration status.
+7. **Flight & Mission Status**: Armed / Disarmed state, Flight Mode (GUIDED, AUTO, LOITER, RTL, STABILIZE), and Mission Substates.
+8. **3-Axis Gyroscope Rates**: Real-time angular rates ($\omega_x, \omega_y, \omega_z$ in deg/s) and accelerometer ($A_x, A_y, A_z$ in g).
+9. **PID Attitude Tracking**: Target vs Measured Pitch and Roll, with real-time error tracking.
+10. **Motor Equalizer**: Power output for Motors 1, 2, 3, 4 (PWM $\mu\text{s}$ and thrust %).
+11. **SBC Health**: Raspberry Pi CPU Core Temperature (°C), CPU Load (%), RAM Usage, and Storage.
 
-### 2. Symmetrical 20-Byte Packet Protocol
-Unlike legacy CSV text strings which exceed the 32-byte RF24 payload limit (~42 bytes) and lead to string corruption or buffer overflows, this system employs a 20-byte packed binary struct:
-- `uint8_t magic` (0xAA)
-- `uint8_t seq` (0-255)
-- `uint16_t bat_mv` (millivolts)
-- `int16_t rssi` (% / dBm)
-- `int32_t alt_cm` (centimeters)
-- `int32_t lat_e7` (degrees * 10^7)
-- `int32_t lon_e7` (degrees * 10^7)
-- `uint8_t satellites`
-- `uint8_t checksum` (8-bit XOR)
-
-### 3. Display Logic & Loss of Signal (LOS) Guard
-The OLED is refreshed at 20 FPS (every 50ms) without blocking the NRF24 FIFO read loop.
-If no packets are decoded for $\ge 30,000\text{ ms}$, the display transitions into a dedicated `! NO CONNECTION !` warning screen with dynamic elapsed loss tracking (`Lost: Xs ago`). Telemetry immediately recovers upon packet reception.
+### 3. Dual Ground Visualization Layers
+- **Interactive Web Dashboard (`pi/web/`)**: Served directly from the Pi over WebSockets at `http://<pi-ip>:8000` with 10 Hz zero-latency streaming, Chart.js graphs, and Leaflet satellite maps.
+- **Grafana Integration (`pi/grafana_dashboard.json`)**: Pre-configured 11-panel dashboard export querying the `/metrics` endpoint.
+- **Handheld Ground Receiver (`esp/esp.ino`)**: Handheld ESP32 + SH1106 OLED receiver unit reading 20-byte packed packets over NRF24L01+ 2.4 GHz RF.

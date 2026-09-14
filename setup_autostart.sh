@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ======================================================================================
 # Setup Script: Install & Enable Drone Telemetry Service on Raspberry Pi Boot
+# Location: /storage/projects/drone_telemetry/setup_autostart.sh
 # ======================================================================================
 
 set -e
@@ -11,9 +12,13 @@ USER_HOME=$(eval echo "~$CURRENT_USER")
 SERVICE_NAME="drone-telemetry.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 
-# Detect Python interpreter
+# Detect Python interpreter (venv in root or pi/, else system python3)
 if [ -f "${SCRIPT_DIR}/venv/bin/python3" ]; then
     PYTHON_EXEC="${SCRIPT_DIR}/venv/bin/python3"
+elif [ -f "${SCRIPT_DIR}/pi/venv/bin/python3" ]; then
+    PYTHON_EXEC="${SCRIPT_DIR}/pi/venv/bin/python3"
+elif [ -f "${USER_HOME}/drone_telemetry/venv/bin/python3" ]; then
+    PYTHON_EXEC="${USER_HOME}/drone_telemetry/venv/bin/python3"
 elif [ -f "${USER_HOME}/drone_telemetry/pi/venv/bin/python3" ]; then
     PYTHON_EXEC="${USER_HOME}/drone_telemetry/pi/venv/bin/python3"
 else
@@ -37,7 +42,7 @@ sudo rm -f "/etc/systemd/system/${SERVICE_NAME}" 2>/dev/null || true
 # 2. Generate systemd service file with dynamic paths
 cat << SERVICE_EOF | sudo tee "${SERVICE_PATH}" > /dev/null
 [Unit]
-Description=Drone Telemetry NRF24 Transmitter Service
+Description=Drone Telemetry Web Dashboard & MAVLink Server
 After=network.target local-fs.target
 Wants=network.target
 
@@ -45,7 +50,7 @@ Wants=network.target
 Type=simple
 User=${CURRENT_USER}
 WorkingDirectory=${SCRIPT_DIR}
-ExecStart=${PYTHON_EXEC} ${SCRIPT_DIR}/pixhawk_telemetry_tx.py --port /dev/serial0 --baud 115200
+ExecStart=${PYTHON_EXEC} ${SCRIPT_DIR}/pi/dashboard_server.py --port /dev/serial0 --baud 115200 --web-port 8000
 Restart=always
 RestartSec=3
 StandardOutput=journal
@@ -66,7 +71,7 @@ echo "[*] Enabling ${SERVICE_NAME} to start automatically on boot..."
 sudo systemctl enable "${SERVICE_NAME}"
 
 echo "[*] Starting ${SERVICE_NAME} now..."
-sudo systemctl restart "${SERVICE_NAME}"
+sudo systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
 
 echo ""
 echo "=============================================================="

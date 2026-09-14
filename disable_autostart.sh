@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ======================================================================================
 # Disable & Remove Drone Telemetry Auto-Start Service
+# Location: /storage/projects/drone_telemetry/disable_autostart.sh
 # ======================================================================================
 
 SERVICE_NAME="drone-telemetry.service"

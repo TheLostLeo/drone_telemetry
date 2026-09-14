@@ -1,4 +1,0 @@
-# Python dependencies for Raspberry Pi Drone Telemetry Transmitter
-pyrf24>=0.6.0
-pymavlink>=2.4.40
-pyserial>=3.5
