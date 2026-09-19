@@ -18,13 +18,15 @@ import time
 import json
 import base64
 import hashlib
+import mimetypes
 import struct
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WEB_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "web"))
+WEB_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "web"))
+WEB_DIST_DIR = os.path.join(WEB_DIR, "dist")
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
@@ -139,19 +141,17 @@ class WebDashboardModule:
                     self.wfile.write(payload.encode("utf-8"))
                     return
 
-                # Static files
-                if clean_path in ("/", "/index.html"):
-                    target_file = os.path.join(WEB_DIR, "index.html")
-                    content_type = "text/html; charset=utf-8"
-                elif clean_path == "/style.css":
-                    target_file = os.path.join(WEB_DIR, "style.css")
-                    content_type = "text/css"
-                elif clean_path == "/app.js":
-                    target_file = os.path.join(WEB_DIR, "app.js")
-                    content_type = "application/javascript"
-                else:
-                    self.send_error(404, "File Not Found")
+                static_root = WEB_DIST_DIR if os.path.isdir(WEB_DIST_DIR) else WEB_DIR
+                relative_path = "index.html" if clean_path in ("/", "/index.html") else clean_path.lstrip("/")
+                target_file = os.path.abspath(os.path.join(static_root, relative_path))
+
+                if not target_file.startswith(os.path.abspath(static_root)):
+                    self.send_error(403, "Forbidden")
                     return
+
+                content_type = mimetypes.guess_type(target_file)[0] or "application/octet-stream"
+                if target_file.endswith(".html"):
+                    content_type = "text/html; charset=utf-8"
 
                 if os.path.exists(target_file):
                     with open(target_file, "rb") as f:

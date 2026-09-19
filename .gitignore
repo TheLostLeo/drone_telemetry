@@ -9,6 +9,12 @@ __pycache__/
 venv/
 ENV/
 
+# Web frontend dependencies & builds
+node_modules/
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+
 # Arduino build artifacts
 build/
 *.bin
