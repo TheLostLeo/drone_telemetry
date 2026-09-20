@@ -69,6 +69,7 @@ class MAVLinkManager:
             # 6. Heading & Compass
             "heading": 0.0,
             "compass_status": "CALIBRATED",
+            "ground_speed": 0.0,
             
             # 7. Flight Status & Mission Autonomy State
             "armed": False,
@@ -571,6 +572,7 @@ class MAVLinkManager:
                                 # 6. VFR_HUD
                                 elif msg_type == 'VFR_HUD':
                                     self.state["climb_rate"] = round(msg.climb, 2)
+                                    self.state["ground_speed"] = round(msg.groundspeed, 2)
                                     if msg.heading != 0:
                                         self.state["heading"] = round(msg.heading, 1)
                                     if hasattr(msg, 'alt') and msg.alt is not None:
@@ -837,6 +839,7 @@ class MAVLinkManager:
                     "rc_rssi": int(92 + 5 * math.sin(t * 0.1)),
                     "radio_link_quality": 98,
                     "heading": round(sim_heading, 1),
+                    "ground_speed": 5.0 if is_auto and has_mission else 2.0,
                     "mission_state": mission_state,
                     "mission_progress_percent": progress_pct,
                     "mission_current_seq": self.sim_mission_index,

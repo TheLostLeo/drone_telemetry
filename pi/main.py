@@ -35,6 +35,7 @@ def main():
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate (default: 115200)")
     parser.add_argument("--web-port", type=int, default=8000, help="Web Dashboard HTTP Port (default: 8000)")
     parser.add_argument("--radio-rate", type=float, default=5.0, help="NRF24 broadcast rate in Hz (default: 5.0)")
+    parser.add_argument("--no-web", action="store_true", help="Disable Pi-hosted web dashboard; keep MAVLink and NRF telemetry only")
     parser.add_argument("--no-radio", action="store_true", help="Disable NRF24 radio module")
     parser.add_argument("--simulate", action="store_true", help="Run simulated flight telemetry without hardware")
     args = parser.parse_args()
@@ -43,7 +44,7 @@ def main():
     print("        DRONE TELEMETRY MASTER COMPANION SERVER (RASPBERRY PI 4B)       ")
     print("=" * 76)
     print(f"[*] Flight Controller Port:  {args.port} @ {args.baud} baud")
-    print(f"[*] Web Dashboard Port:      http://0.0.0.0:{args.web_port}")
+    print(f"[*] Web Dashboard:           {'DISABLED' if args.no_web else f'http://0.0.0.0:{args.web_port}'}")
     print(f"[*] Radio TX Broadcast Rate: {args.radio_rate} Hz ({'DISABLED' if args.no_radio else 'ENABLED'})")
     print(f"[*] Operation Mode:          {'SIMULATION' if args.simulate else 'LIVE PIXHAWK'}")
     print("----------------------------------------------------------------------------")
@@ -61,26 +62,31 @@ def main():
     print("[✓] Module 3 (Grid Search Autonomy): Ready.")
 
     # 4. Module 2: Mission Control Web Dashboard & WebSocket Server
-    dashboard_module = WebDashboardModule(
-        mav_manager=mav_manager,
-        sbc_monitor=sbc_monitor,
-        grid_module=grid_module,
-        port=args.web_port
-    )
-    dashboard_module.start()
+    dashboard_module = None
+    if args.no_web:
+        print("[*] Module 2 (Web Dashboard): Disabled; ESP32 Wi-Fi JSON will feed the laptop dashboard.")
+    else:
+        dashboard_module = WebDashboardModule(
+            mav_manager=mav_manager,
+            sbc_monitor=sbc_monitor,
+            grid_module=grid_module,
+            port=args.web_port
+        )
+        dashboard_module.start()
 
     # 5. Module 1: NRF24 Radio Transmitter
     radio_module = RadioTXModule(
         mav_manager=mav_manager,
+        sbc_monitor=sbc_monitor,
         rate_hz=args.radio_rate,
         enabled=not args.no_radio
     )
     radio_module.start()
 
     print("\n" + "=" * 76)
-    print(f"  🚀 ALL 3 MODULES RUNNING CONCURRENTLY ON RASPBERRY PI!")
+    print(f"  🚀 COMPANION TELEMETRY RUNNING ON RASPBERRY PI!")
     print(f"  • Module 1 (Radio TX):        NRF24L01+ broadcast -> ESP32 Handheld OLED")
-    print(f"  • Module 2 (Web Dashboard):   http://0.0.0.0:{args.web_port}")
+    print(f"  • Module 2 (Web Dashboard):   {'DISABLED' if args.no_web else f'http://0.0.0.0:{args.web_port}'}")
     print(f"  • Module 3 (Grid Autonomy):   Boustrophedon generator & MAVLink controller")
     print("=" * 76 + "\n")
     print("[*] Press Ctrl+C to stop all services.\n")
@@ -89,7 +95,8 @@ def main():
     def shutdown(signum, frame):
         print("\n[*] Stopping companion modules...")
         radio_module.stop()
-        dashboard_module.stop()
+        if dashboard_module:
+            dashboard_module.stop()
         mav_manager.stop()
         print("[✓] All modules stopped cleanly.")
         sys.exit(0)

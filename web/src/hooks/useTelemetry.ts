@@ -4,9 +4,60 @@ import type { GyroPoint, MotorPoint, PidPoint, Telemetry } from "../types/teleme
 
 const SAMPLES = 64;
 const TICK_MS = 260;
+const LIVE_ENDPOINT = "http://192.168.4.1/telemetry.json";
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const wobble = (amp: number) => (Math.random() - 0.5) * 2 * amp;
+const num = (value: unknown, fallback = 0) => (typeof value === "number" && Number.isFinite(value) ? value : fallback);
+
+type RawTelemetry = {
+  connected?: boolean;
+  battery_voltage?: number;
+  battery_current?: number;
+  battery_remaining?: number;
+  cell_voltages?: number[];
+  altitude_relative?: number;
+  altitude_msl?: number;
+  climb_rate?: number;
+  latitude?: number;
+  longitude?: number;
+  satellites?: number;
+  gps_fix_type?: string;
+  hdop?: number;
+  rc_rssi?: number;
+  radio_link_quality?: number;
+  heading?: number;
+  ground_speed?: number;
+  armed?: boolean;
+  flight_mode?: string;
+  mission_state?: string;
+  mission_current_seq?: number;
+  mission_total_items?: number;
+  attitude_roll?: number;
+  attitude_pitch?: number;
+  attitude_yaw?: number;
+  error_roll?: number;
+  error_pitch?: number;
+  error_yaw?: number;
+  motor_percent?: number[];
+  gyro_x?: number;
+  gyro_y?: number;
+  gyro_z?: number;
+  sbc?: {
+    cpu_load_percent?: number;
+    ram_used_mb?: number;
+    ram_total_mb?: number;
+    ram_percent?: number;
+    cpu_temp_c?: number;
+    disk_percent?: number;
+    uptime_seconds?: number;
+  };
+};
+
+function getLiveEndpoint(): string {
+  const configured = new URLSearchParams(window.location.search).get("telemetryUrl");
+  return configured && configured.trim().length > 0 ? configured : LIVE_ENDPOINT;
+}
 
 function seedSeries(): {
   pid: PidPoint[];
@@ -201,12 +252,139 @@ function step(prev: Telemetry): Telemetry {
   };
 }
 
+function fromLive(prev: Telemetry, raw: RawTelemetry): Telemetry {
+  const t = prev.clock + 1;
+  const rawCells = Array.isArray(raw.cell_voltages) ? raw.cell_voltages.filter((cell) => cell > 0.5).slice(0, 6) : [];
+  const cells = (rawCells.length > 0 ? rawCells : prev.battery.cells.map((cell) => cell.volts)).map((volts, i) => ({
+    label: cellLabels[i] ?? `${i + 1}S`,
+    volts
+  }));
+  const total = num(raw.battery_voltage, cells.reduce((sum, cell) => sum + cell.volts, 0));
+  const percent = clamp(Math.round(num(raw.battery_remaining, prev.battery.percent)), 0, 100);
+  const heading = (num(raw.heading, prev.nav.heading) + 360) % 360;
+  const motors = Array.isArray(raw.motor_percent) ? raw.motor_percent : [];
+  const lastMotors = prev.motors[prev.motors.length - 1] ?? { m1: 0, m2: 0, m3: 0, m4: 0 };
+  const sbc = raw.sbc ?? {};
+  const ramPercent = num(sbc.ram_percent, prev.sbc.memTotal > 0 ? (prev.sbc.memUsed / prev.sbc.memTotal) * 100 : 0);
+  const memTotal = num(sbc.ram_total_mb, prev.sbc.memTotal * 1024) / 1024 || prev.sbc.memTotal;
+  const memUsed = num(sbc.ram_used_mb, (ramPercent / 100) * memTotal * 1024) / 1024;
+
+  return {
+    clock: t,
+    battery: {
+      total,
+      percent,
+      current: num(raw.battery_current, prev.battery.current),
+      consumed: prev.battery.consumed,
+      cells
+    },
+    nav: {
+      lat: num(raw.latitude, prev.nav.lat),
+      lon: num(raw.longitude, prev.nav.lon),
+      heading,
+      sats: clamp(Math.round(num(raw.satellites, prev.nav.sats)), 0, 32),
+      hdop: num(raw.hdop, prev.nav.hdop),
+      rssi: Math.round(num(raw.rc_rssi, prev.nav.rssi)),
+      fix: raw.gps_fix_type ?? prev.nav.fix,
+      groundSpeed: num(raw.ground_speed, prev.nav.groundSpeed)
+    },
+    altitude: {
+      relative: num(raw.altitude_relative, prev.altitude.relative),
+      msl: num(raw.altitude_msl, prev.altitude.msl),
+      vspeed: num(raw.climb_rate, prev.altitude.vspeed),
+      home: prev.altitude.home
+    },
+    link: {
+      rssi: Math.round(num(raw.rc_rssi, prev.link.rssi)),
+      rate: clamp(num(raw.radio_link_quality, raw.connected === false ? 0 : 95), 0, 100),
+      loss: raw.connected === false ? 100 : 0,
+      latency: prev.link.latency,
+      history: [...prev.link.history.slice(-27), clamp(num(raw.radio_link_quality, raw.connected === false ? 0 : 95), 0, 100)]
+    },
+    flight: {
+      mode: raw.flight_mode ?? prev.flight.mode,
+      armed: raw.armed ?? prev.flight.armed,
+      failsafe: raw.connected === false,
+      mission: raw.mission_state ?? prev.flight.mission,
+      wp: `${Math.round(num(raw.mission_current_seq, 0))} / ${Math.round(num(raw.mission_total_items, 0))}`,
+      link: raw.connected === false ? "LOST" : "OK"
+    },
+    sbc: {
+      cpu: clamp(num(sbc.cpu_load_percent, prev.sbc.cpu), 0, 100),
+      cores: prev.sbc.cores,
+      memUsed,
+      memTotal,
+      temp: num(sbc.cpu_temp_c, prev.sbc.temp),
+      uptime: num(sbc.uptime_seconds, prev.sbc.uptime),
+      diskUsed: clamp(num(sbc.disk_percent, prev.sbc.diskUsed), 0, 100),
+      diskTotal: prev.sbc.diskTotal,
+      load: prev.sbc.load
+    },
+    attitude: {
+      roll: num(raw.attitude_roll, prev.attitude.roll),
+      pitch: num(raw.attitude_pitch, prev.attitude.pitch),
+      yaw: num(raw.attitude_yaw, heading)
+    },
+    pid: [
+      ...prev.pid.slice(-(SAMPLES - 1)),
+      {
+        t,
+        roll: num(raw.error_roll, 0),
+        pitch: num(raw.error_pitch, 0),
+        yaw: num(raw.error_yaw, 0)
+      }
+    ],
+    motors: [
+      ...prev.motors.slice(-(SAMPLES - 1)),
+      {
+        t,
+        m1: num(motors[0], lastMotors.m1),
+        m2: num(motors[1], lastMotors.m2),
+        m3: num(motors[2], lastMotors.m3),
+        m4: num(motors[3], lastMotors.m4)
+      }
+    ],
+    gyro: [
+      ...prev.gyro.slice(-(SAMPLES - 1)),
+      {
+        t,
+        x: num(raw.gyro_x, 0),
+        y: num(raw.gyro_y, 0),
+        z: num(raw.gyro_z, 0)
+      }
+    ]
+  };
+}
+
 export function useTelemetry(live: boolean): Telemetry {
   const [state, setState] = useState<Telemetry>(initial);
 
   useEffect(() => {
     if (!live) return;
-    const id = window.setInterval(() => setState(step), TICK_MS);
+    const endpoint = getLiveEndpoint();
+    let failedPolls = 0;
+
+    const poll = async () => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 180);
+      try {
+        const response = await fetch(endpoint, { cache: "no-store", signal: controller.signal });
+        if (!response.ok) throw new Error(`telemetry http ${response.status}`);
+        const raw = (await response.json()) as RawTelemetry;
+        failedPolls = 0;
+        setState((prev) => fromLive(prev, raw));
+      } catch {
+        failedPolls += 1;
+        if (failedPolls > 3) {
+          setState(step);
+        }
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    };
+
+    void poll();
+    const id = window.setInterval(() => void poll(), TICK_MS);
     return () => window.clearInterval(id);
   }, [live]);
 

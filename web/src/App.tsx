@@ -115,9 +115,9 @@ export function App({ streaming = true }: { streaming?: boolean }) {
         <footer className="flex items-center justify-between px-1 pb-1 font-mono text-2xs text-hud-faint">
           <span className="flex items-center gap-1.5">
             <span className={`h-1.5 w-1.5 rounded-full ${live ? "bg-sig-green" : "bg-hud-edge"}`} aria-hidden="true" />
-            {live ? "stream live · esp32 ws://192.168.4.1:81" : "stream held · last frame retained"}
+            {live ? "stream live · esp32 http://192.168.4.1/telemetry.json" : "stream held · last frame retained"}
           </span>
-          <span className="hidden sm:block">mock telemetry · gcs build 0.9.4</span>
+          <span className="hidden sm:block">esp32 json with mock fallback · gcs build 0.9.5</span>
         </footer>
       </main>
     </div>

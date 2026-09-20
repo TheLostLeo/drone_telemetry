@@ -22,14 +22,14 @@ A high-performance, real-time drone companion system running on a **Raspberry Pi
 │  ┌───────────────────────┐ ┌───────────────────────┐ ┌───────────────────┐  │
 │  │ Module 1: Radio TX    │ │ Module 2: Web Server  │ │ Module 3: Grid    │  │
 │  │ NRF24L01+ SPI (5 Hz)  │ │ Mission Control (10Hz)│ │ Search Autonomy   │  │
-│  │ 20-byte packed struct │ │ Port 8000 WebSockets  │ │ MAVLink Waypoints │  │
+│  │ 32-byte frame stream  │ │ Port 8000 WebSockets  │ │ MAVLink Waypoints │  │
 │  └───────────┬───────────┘ └───────────┬───────────┘ └───────────────────┘  │
 └──────────────┼─────────────────────────┼────────────────────────────────────┘
                │ 2.4 GHz RF              │ HTTP / WebSockets
                ▼                         ▼
 ┌──────────────────────────────┐ ┌────────────────────────────────────────────┐
 │   ESP32 Handheld Receiver    │ │       Any Web Browser / Ground PC          │
-│ 1.3" I2C SH1106 OLED Display │ │         http://<pi-ip>:8000                │
+│  OLED + ESP Wi-Fi JSON API   │ │         http://<pi-ip>:8000                │
 └──────────────────────────────┘ └────────────────────────────────────────────┘
 ```
 
@@ -64,7 +64,12 @@ python3 pi/main.py --port /dev/ttyACM0 --baud 115200 --web-port 8000
 python3 pi/main.py --port /dev/serial0 --baud 115200 --web-port 8000
 ```
 
-#### C. Simulation Mode (Runs full virtual flight physics without hardware):
+#### C. NRF-only bridge mode (frontend runs from the laptop through the ESP32):
+```bash
+python3 pi/main.py --port /dev/serial0 --baud 115200 --no-web
+```
+
+#### D. Simulation Mode (Runs full virtual flight physics without hardware):
 ```bash
 python3 pi/main.py --simulate --web-port 8000
 ```
@@ -75,6 +80,16 @@ python3 pi/main.py --simulate --web-port 8000
 Open any browser on your phone, tablet, or laptop connected to the same Wi-Fi network:
 ```
 http://<your-raspberry-pi-ip>:8000
+```
+
+For the standalone React dashboard in `web/`, the ESP32 serves the live NRF telemetry snapshot at:
+```
+http://192.168.4.1/telemetry.json
+```
+
+The ESP32 starts an access point named `DroneTelemetryESP32` with password `drone12345`. The dashboard polls that JSON endpoint and falls back to mock telemetry if the ESP32 is not reachable. To point the dashboard at a different ESP address:
+```
+http://localhost:5173/?telemetryUrl=http://<esp-ip>/telemetry.json
 ```
 
 ---
@@ -122,8 +137,8 @@ python3 test_stream.py
 |---|---|---|---|
 | **VCC** | 3.3V Power | **Pin 1** or **Pin 17** | 3.3V Logic (10-100µF capacitor recommended across VCC/GND) |
 | **GND** | Ground | **Pin 6**, **Pin 9**, or **Pin 25** | Ground |
-| **CE** | GPIO 22 | **Pin 15** | Chip Enable |
-| **CSN** | GPIO 25 | **Pin 22** | SPI Chip Select (or Pin 24 / CE0) |
+| **CE** | GPIO 25 | **Pin 22** | Chip Enable |
+| **CSN** | GPIO 8 / SPI0 CE0 | **Pin 24** | SPI Chip Select |
 | **SCK** | GPIO 11 (SCLK) | **Pin 23** | SPI Clock |
 | **MOSI** | GPIO 10 (MOSI) | **Pin 19** | SPI Data Out |
 | **MISO** | GPIO 9 (MISO) | **Pin 21** | SPI Data In |
