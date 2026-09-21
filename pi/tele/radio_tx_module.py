@@ -228,6 +228,7 @@ class RadioTXModule:
         rssi = int(t.get("rc_rssi", 0))
         if rssi <= 0 and t.get("connected", False):
             rssi = 90
+        link_quality = int(t.get("radio_link_quality", 0) or rssi)
 
         alt = t.get("altitude_relative", 0.0)
         if alt == 0.0 and t.get("altitude_msl", 0.0) != 0.0:
@@ -253,7 +254,7 @@ class RadioTXModule:
         basic += self._u8(self._gps_fix_id(t.get("gps_fix_type", "NO FIX")))
         basic += self._u8(self._flight_mode_id(t.get("flight_mode", "DISCONNECTED")))
         basic += self._u8(self._system_status_id(t.get("system_status", "ACTIVE")))
-        basic += self._u8(t.get("radio_link_quality", rssi))
+        basic += self._u8(link_quality)
         basic += self._u8(t.get("mission_progress_percent", 0))
         basic += self._u8(len([c for c in cells if c > 1.0]))
 

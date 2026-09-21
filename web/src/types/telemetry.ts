@@ -51,12 +51,10 @@ export interface FlightState {
 export interface SbcState {
   cpu: number;
   cores: number[];
-  memUsed: number;
-  memTotal: number;
+  memPercent: number;
   temp: number;
   uptime: number;
-  diskUsed: number;
-  diskTotal: number;
+  diskPercent: number;
   load: [number, number, number];
 }
 

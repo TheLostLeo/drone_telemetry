@@ -115,12 +115,10 @@ function offlineTelemetry(endpoint = "", message = "Enter ESP IP to start"): Tel
     sbc: {
       cpu: 0,
       cores: [0, 0, 0, 0],
-      memUsed: 0,
-      memTotal: 0,
+      memPercent: 0,
       temp: 0,
       uptime: 0,
-      diskUsed: 0,
-      diskTotal: 0,
+      diskPercent: 0,
       load: [0, 0, 0]
     },
     attitude: { roll: 0, pitch: 0, yaw: 0 },
@@ -181,7 +179,7 @@ function markJsonDegraded(prev: Telemetry, endpoint: string, detail: string, fai
   };
 }
 
-function fromLive(prev: Telemetry, raw: RawTelemetry, endpoint: string): Telemetry {
+function fromLive(prev: Telemetry, raw: RawTelemetry, endpoint: string, latencyMs: number): Telemetry {
   const t = prev.clock + 1;
   const nrfFresh = raw.connected !== false;
   const rawCells = Array.isArray(raw.cell_voltages) ? raw.cell_voltages.filter((cell) => cell > 0.5).slice(0, 6) : [];
@@ -195,10 +193,12 @@ function fromLive(prev: Telemetry, raw: RawTelemetry, endpoint: string): Telemet
   const motors = Array.isArray(raw.motor_percent) ? raw.motor_percent : [];
   const lastMotors = prev.motors[prev.motors.length - 1] ?? { m1: 0, m2: 0, m3: 0, m4: 0 };
   const sbc = raw.sbc ?? {};
-  const ramPercent = num(sbc.ram_percent, prev.sbc.memTotal > 0 ? (prev.sbc.memUsed / prev.sbc.memTotal) * 100 : 0);
-  const memTotal = num(sbc.ram_total_mb, prev.sbc.memTotal * 1024) / 1024 || prev.sbc.memTotal;
-  const memUsed = num(sbc.ram_used_mb, (ramPercent / 100) * memTotal * 1024) / 1024;
-  const linkRate = nrfFresh ? clamp(num(raw.radio_link_quality, 95), 0, 100) : 0;
+  const ramPercent = clamp(num(sbc.ram_percent, prev.sbc.memPercent), 0, 100);
+  const diskPercent = clamp(num(sbc.disk_percent, prev.sbc.diskPercent), 0, 100);
+  const rssiPercent = clamp(Math.round(num(raw.rc_rssi, 0)), 0, 100);
+  const reportedQuality = num(raw.radio_link_quality, 0);
+  const linkRate = nrfFresh ? clamp(reportedQuality > 0 ? reportedQuality : rssiPercent > 0 ? rssiPercent : 95, 0, 100) : 0;
+  const linkLoss = nrfFresh ? clamp(100 - linkRate, 0, 100) : 100;
 
   return {
     clock: t,
@@ -221,7 +221,7 @@ function fromLive(prev: Telemetry, raw: RawTelemetry, endpoint: string): Telemet
       heading,
       sats: clamp(Math.round(num(raw.satellites, prev.nav.sats)), 0, 32),
       hdop: num(raw.hdop, prev.nav.hdop),
-      rssi: Math.round(num(raw.rc_rssi, 0)),
+      rssi: rssiPercent,
       fix: raw.gps_fix_type ?? prev.nav.fix,
       groundSpeed: nrfFresh ? num(raw.ground_speed, prev.nav.groundSpeed) : 0
     },
@@ -232,10 +232,10 @@ function fromLive(prev: Telemetry, raw: RawTelemetry, endpoint: string): Telemet
       home: prev.altitude.home
     },
     link: {
-      rssi: Math.round(num(raw.rc_rssi, 0)),
+      rssi: rssiPercent,
       rate: linkRate,
-      loss: nrfFresh ? 0 : 100,
-      latency: prev.link.latency,
+      loss: linkLoss,
+      latency: latencyMs,
       history: [...prev.link.history.slice(-27), linkRate]
     },
     flight: {
@@ -248,14 +248,12 @@ function fromLive(prev: Telemetry, raw: RawTelemetry, endpoint: string): Telemet
     },
     sbc: {
       cpu: clamp(num(sbc.cpu_load_percent, prev.sbc.cpu), 0, 100),
-      cores: prev.sbc.cores,
-      memUsed,
-      memTotal,
+      cores: Array.from({ length: 4 }, () => clamp(num(sbc.cpu_load_percent, prev.sbc.cpu), 0, 100)),
+      memPercent: ramPercent,
       temp: num(sbc.cpu_temp_c, prev.sbc.temp),
       uptime: num(sbc.uptime_seconds, prev.sbc.uptime),
-      diskUsed: clamp(num(sbc.disk_percent, prev.sbc.diskUsed), 0, 100),
-      diskTotal: prev.sbc.diskTotal,
-      load: prev.sbc.load
+      diskPercent,
+      load: [clamp(num(sbc.cpu_load_percent, prev.sbc.cpu), 0, 100), ramPercent, diskPercent]
     },
     attitude: {
       roll: nrfFresh ? num(raw.attitude_roll, prev.attitude.roll) : 0,
@@ -315,12 +313,14 @@ export function useTelemetry(live: boolean, endpoint: string): Telemetry {
     const poll = async () => {
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      const startedAt = performance.now();
       try {
         const response = await fetch(endpoint, { cache: "no-store", signal: controller.signal });
         if (!response.ok) throw new Error(`http ${response.status}`);
         const raw = (await response.json()) as RawTelemetry;
+        const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
         failures = 0;
-        setState((prev) => fromLive(prev, raw, endpoint));
+        setState((prev) => fromLive(prev, raw, endpoint, latencyMs));
       } catch (error) {
         failures += 1;
         const detail = errorText(error);
