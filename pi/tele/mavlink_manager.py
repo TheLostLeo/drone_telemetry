@@ -2,7 +2,7 @@
 """
 ======================================================================================
 Module: MAVLink Telemetry Manager & Shared State Hub
-File: pi/modules/mavlink_manager.py
+File: pi/tele/mavlink_manager.py
 
 Description:
   Singleton MAVLink reader that connects to Pixhawk 2.4.8 on TELEM2 (/dev/serial0)

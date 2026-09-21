@@ -2,7 +2,7 @@
 """
 ======================================================================================
 Module: Raspberry Pi SBC Health & Hardware Monitor
-File: pi/modules/sbc_monitor.py
+File: pi/tele/sbc_monitor.py
 
 Description:
   Extracts real-time Single Board Computer (SBC) performance metrics directly from

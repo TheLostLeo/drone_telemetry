@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { GaugeIcon, SlidersHorizontalIcon, WavesIcon } from "lucide-react";
+import { GaugeIcon, PlugZapIcon, SlidersHorizontalIcon, WavesIcon, WifiIcon } from "lucide-react";
 import { AltitudeCard } from "./components/AltitudeCard";
 import { AttitudeIndicator } from "./components/AttitudeIndicator";
 import { BatteryBox } from "./components/BatteryBox";
@@ -29,9 +29,121 @@ function sourceTone(status: Telemetry["source"]["status"]): string {
   return "bg-sig-red";
 }
 
+const ESP_IP_STORAGE_KEY = "droneTelemetryEspIp";
+
+function initialEspInput(): string {
+  const fromQuery = new URLSearchParams(window.location.search).get("telemetryUrl");
+  if (fromQuery) {
+    try {
+      return new URL(fromQuery).host;
+    } catch {
+      return fromQuery.replace(/^https?:\/\//, "").replace(/\/telemetry\.json\/?$/, "");
+    }
+  }
+  return window.localStorage.getItem(ESP_IP_STORAGE_KEY) ?? "";
+}
+
+function telemetryEndpointFromInput(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return "";
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+  const url = new URL(withProtocol);
+  if (url.pathname === "/" || url.pathname === "") {
+    url.pathname = "/telemetry.json";
+  }
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function ConnectionPanel({
+  value,
+  error,
+  onChange,
+  onSubmit
+}: {
+  value: string;
+  error: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="hud-grid-bg flex min-h-full w-full items-center justify-center bg-hud-bg p-4 font-sans text-hud-text">
+      <form
+        className="w-full max-w-[440px] rounded border border-hud-line bg-hud-panel p-4 shadow-[0_18px_60px_rgba(0,0,0,0.35)]"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSubmit();
+        }}
+      >
+        <div className="mb-4 flex items-center gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded border border-teal-400/30 bg-teal-400/10 text-teal-300">
+            <WifiIcon size={18} />
+          </span>
+          <div className="min-w-0">
+            <h1 className="text-sm font-semibold uppercase tracking-[0.08em] text-hud-text">Connect ESP32 Telemetry</h1>
+            <p className="mt-1 text-xs leading-5 text-hud-muted">Enter the IP shown on the ESP32 OLED.</p>
+          </div>
+        </div>
+
+        <label className="mb-2 block font-mono text-2xs uppercase tracking-[0.12em] text-hud-faint" htmlFor="esp-ip">
+          ESP32 IP address
+        </label>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <input
+            id="esp-ip"
+            autoFocus
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            placeholder="10.160.142.17"
+            className="h-10 min-w-0 flex-1 rounded border border-hud-line bg-hud-bg px-3 font-mono text-sm tabular text-hud-text outline-none transition focus:border-teal-300 focus:ring-2 focus:ring-teal-300/20"
+          />
+          <button
+            type="submit"
+            className="inline-flex h-10 items-center justify-center gap-2 rounded border border-teal-300/40 bg-teal-300/15 px-4 font-mono text-2xs font-semibold uppercase tracking-[0.12em] text-teal-200 transition hover:border-teal-200 hover:bg-teal-300/20 focus:outline-none focus:ring-2 focus:ring-teal-300/30"
+          >
+            <PlugZapIcon size={14} />
+            Connect
+          </button>
+        </div>
+
+        {error ? <p className="mt-3 font-mono text-2xs uppercase tracking-[0.08em] text-sig-red">{error}</p> : null}
+
+        <div className="mt-4 rounded border border-hud-line bg-hud-bg/70 p-3 font-mono text-2xs leading-5 text-hud-muted">
+          <div>Example: 10.160.142.17</div>
+          <div>Dashboard will read: http://&lt;esp-ip&gt;/telemetry.json</div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export function App({ streaming = true }: { streaming?: boolean }) {
   const [live, setLive] = useState(streaming);
-  const t = useTelemetry(live);
+  const [espInput, setEspInput] = useState(initialEspInput);
+  const [endpoint, setEndpoint] = useState("");
+  const [connectError, setConnectError] = useState("");
+  const t = useTelemetry(live, endpoint);
+
+  const connect = () => {
+    try {
+      const nextEndpoint = telemetryEndpointFromInput(espInput);
+      if (nextEndpoint.length === 0) {
+        setConnectError("Enter the ESP32 IP address from the OLED.");
+        return;
+      }
+      setEndpoint(nextEndpoint);
+      setLive(true);
+      setConnectError("");
+      window.localStorage.setItem(ESP_IP_STORAGE_KEY, espInput.trim());
+    } catch {
+      setConnectError("Use an IP or host like 10.160.142.17.");
+    }
+  };
+
+  if (endpoint.length === 0) {
+    return <ConnectionPanel value={espInput} error={connectError} onChange={setEspInput} onSubmit={connect} />;
+  }
 
   return (
     <div className="hud-grid-bg flex min-h-full w-full flex-col bg-hud-bg font-sans">
@@ -138,7 +250,16 @@ export function App({ streaming = true }: { streaming?: boolean }) {
             <span className={`h-1.5 w-1.5 rounded-full ${live ? sourceTone(t.source.status) : "bg-hud-edge"}`} aria-hidden="true" />
             {live ? `${t.source.status} · ${t.source.endpoint}` : "stream held · last frame retained"}
           </span>
-          <span className="hidden sm:block">esp32 json only · no mock fallback · gcs build 0.9.6</span>
+          <button
+            type="button"
+            className="hidden rounded border border-hud-line px-2 py-1 uppercase tracking-[0.12em] text-hud-muted transition hover:border-teal-300/50 hover:text-teal-200 sm:block"
+            onClick={() => {
+              setLive(false);
+              setEndpoint("");
+            }}
+          >
+            change esp
+          </button>
         </footer>
       </main>
     </div>

@@ -2,7 +2,7 @@
 """
 ======================================================================================
 Module 1: NRF24L01+ Radio Telemetry Transmitter (Airborne)
-File: pi/modules/radio_tx_module.py
+File: pi/tele/radio_tx_module.py
 
 Description:
   Takes live flight telemetry from MAVLinkManager, packs it into the compact

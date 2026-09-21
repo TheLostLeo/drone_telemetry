@@ -6,8 +6,6 @@ const SAMPLES = 64;
 const POLL_MS = 1000;
 const REQUEST_TIMEOUT_MS = 2500;
 const OFFLINE_AFTER_FAILURES = 3;
-const LIVE_ENDPOINT = "http://drone-esp32.local/telemetry.json";
-
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const num = (value: unknown, fallback = 0) => (typeof value === "number" && Number.isFinite(value) ? value : fallback);
 
@@ -55,11 +53,6 @@ type RawTelemetry = {
   };
 };
 
-function getLiveEndpoint(): string {
-  const configured = new URLSearchParams(window.location.search).get("telemetryUrl");
-  return configured && configured.trim().length > 0 ? configured : LIVE_ENDPOINT;
-}
-
 function zeroPid() {
   return Array.from({ length: SAMPLES }, (_, t) => ({ t, roll: 0, pitch: 0, yaw: 0 }));
 }
@@ -72,7 +65,7 @@ function zeroGyro() {
   return Array.from({ length: SAMPLES }, (_, t) => ({ t, x: 0, y: 0, z: 0 }));
 }
 
-function offlineTelemetry(endpoint = getLiveEndpoint(), message = "Waiting for ESP JSON"): Telemetry {
+function offlineTelemetry(endpoint = "", message = "Enter ESP IP to start"): Telemetry {
   return {
     clock: 0,
     source: {
@@ -306,12 +299,15 @@ function errorText(error: unknown): string {
   return "request failed";
 }
 
-export function useTelemetry(live: boolean): Telemetry {
-  const [state, setState] = useState<Telemetry>(() => offlineTelemetry());
+export function useTelemetry(live: boolean, endpoint: string): Telemetry {
+  const [state, setState] = useState<Telemetry>(() => offlineTelemetry(endpoint));
 
   useEffect(() => {
-    const endpoint = getLiveEndpoint();
-    if (!live) return;
+    setState(offlineTelemetry(endpoint, endpoint ? "Waiting for ESP JSON" : "Enter ESP IP to start"));
+  }, [endpoint]);
+
+  useEffect(() => {
+    if (!live || endpoint.length === 0) return;
     let stopped = false;
     let failures = 0;
     let timer: number | undefined;
@@ -346,7 +342,7 @@ export function useTelemetry(live: boolean): Telemetry {
       stopped = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [live]);
+  }, [live, endpoint]);
 
   return state;
 }

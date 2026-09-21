@@ -9,7 +9,7 @@ Pixhawk -> MAVLink UART/USB -> Raspberry Pi -> NRF24L01+
 
 ## Folder Layout
 
-- `pi/` - Raspberry Pi companion code. Reads MAVLink from Pixhawk, packages telemetry, and transmits NRF24 frames.
+- `pi/tele/` - Raspberry Pi telemetry relay code. Reads MAVLink from Pixhawk, packages telemetry, and transmits NRF24 frames.
 - `esp/` - ESP32 receiver firmware. Receives NRF24 frames, keeps the OLED display updated, and serves `/telemetry.json` over Wi-Fi.
 - `web/` - React/Vite laptop dashboard. Polls the ESP32 JSON endpoint.
 
@@ -81,19 +81,19 @@ pip install -r requirements.txt
 Live Pixhawk over TELEM2 UART:
 
 ```bash
-python3 pi/main.py --port /dev/serial0 --baud 115200 --radio-rate 5
+python3 pi/tele/main.py --port /dev/serial0 --baud 115200 --radio-rate 5
 ```
 
 Live Pixhawk over USB:
 
 ```bash
-python3 pi/main.py --port /dev/ttyACM0 --baud 115200 --radio-rate 5
+python3 pi/tele/main.py --port /dev/ttyACM0 --baud 115200 --radio-rate 5
 ```
 
 NRF test without Pixhawk:
 
 ```bash
-python3 pi/main.py --simulate --radio-rate 5
+python3 pi/tele/main.py --simulate --radio-rate 5
 ```
 
 `--no-web` is still accepted for old commands, but the Pi no longer hosts the frontend. The web dashboard runs from `web/` and reads ESP32 JSON.
@@ -131,8 +131,16 @@ docker run --rm -p 5173:5173 drone-telemetry-dashboard-web
 Open:
 
 ```text
-http://localhost:5173/?telemetryUrl=http://10.160.142.17/telemetry.json
+http://localhost:5173
 ```
+
+When the dashboard opens, enter the ESP32 IP shown on the OLED, for example:
+
+```text
+10.160.142.17
+```
+
+The dashboard will poll `http://<esp-ip>/telemetry.json`.
 
 ## What to Expect
 
