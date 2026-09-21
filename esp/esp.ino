@@ -566,16 +566,11 @@ void drawTelemetryScreen() {
   }
 
   u8g2.setCursor(2, 58);
-  if ((millis() / 4000) % 2 == 0) {
-    u8g2.print(F("LON: "));
-    if (g_longitude != 0.0) {
-      u8g2.print(g_longitude, 6);
-    } else {
-      u8g2.print(F("NO FIX"));
-    }
+  u8g2.print(F("LON: "));
+  if (g_longitude != 0.0) {
+    u8g2.print(g_longitude, 6);
   } else {
-    u8g2.print(F("IP: "));
-    u8g2.print(g_wifiIpText);
+    u8g2.print(F("NO FIX"));
   }
 
   u8g2.sendBuffer();

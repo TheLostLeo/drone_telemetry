@@ -1,186 +1,150 @@
-# 🛸 Drone Telemetry & Mission Control System
+# Drone Telemetry Relay
 
-A high-performance, real-time drone companion system running on a **Raspberry Pi 4B** connected to a **Pixhawk 2.4.8 (ArduPilot)** flight controller, broadcasting dual telemetry streams to a handheld **ESP32 OLED Ground Unit** and an aerospace-grade **Live Web Dashboard**.
+Live telemetry path:
 
----
-
-## 🏗️ System Architecture
-
-```
-                       ┌───────────────────────────────┐
-                       │     Pixhawk 2.4.8 Flight      │
-                       │          Controller           │
-                       │    (ArduPilot 4.x Firmware)   │
-                       └───────────────┬───────────────┘
-                                       │ MAVLink (115200 baud)
-                                       │ USB (/dev/ttyACM0) or TELEM2 (/dev/serial0)
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       Raspberry Pi 4B Companion Computer                    │
-│                                (pi/main.py)                                 │
-│                                                                             │
-│  ┌───────────────────────┐ ┌───────────────────────┐ ┌───────────────────┐  │
-│  │ Module 1: Radio TX    │ │ Module 2: Web Server  │ │ Module 3: Grid    │  │
-│  │ NRF24L01+ SPI (5 Hz)  │ │ Mission Control (10Hz)│ │ Search Autonomy   │  │
-│  │ 32-byte frame stream  │ │ Port 8000 WebSockets  │ │ MAVLink Waypoints │  │
-│  └───────────┬───────────┘ └───────────┬───────────┘ └───────────────────┘  │
-└──────────────┼─────────────────────────┼────────────────────────────────────┘
-               │ 2.4 GHz RF              │ HTTP / WebSockets
-               ▼                         ▼
-┌──────────────────────────────┐ ┌────────────────────────────────────────────┐
-│   ESP32 Handheld Receiver    │ │       Any Web Browser / Ground PC          │
-│  OLED + ESP Wi-Fi JSON API   │ │         http://<pi-ip>:8000                │
-└──────────────────────────────┘ └────────────────────────────────────────────┘
+```text
+Pixhawk -> MAVLink UART/USB -> Raspberry Pi -> NRF24L01+
+        -> ESP32 -> Wi-Fi JSON -> laptop web dashboard
 ```
 
----
+## Folder Layout
 
-## ⚡ Quick Start Guide
+- `pi/` - Raspberry Pi companion code. Reads MAVLink from Pixhawk, packages telemetry, and transmits NRF24 frames.
+- `esp/` - ESP32 receiver firmware. Receives NRF24 frames, keeps the OLED display updated, and serves `/telemetry.json` over Wi-Fi.
+- `web/` - React/Vite laptop dashboard. Polls the ESP32 JSON endpoint.
 
-### 1. Clone & Set Up Virtual Environment on Raspberry Pi
+## Pixhawk to Raspberry Pi Wiring
+
+For Pixhawk TELEM2 to Raspberry Pi UART:
+
+| Pixhawk TELEM2 | Raspberry Pi 4B |
+|---|---|
+| Pin 2 TX | Pin 10 / GPIO15 RXD0 |
+| Pin 3 RX | Pin 8 / GPIO14 TXD0 |
+| Pin 6 GND | Pin 9 GND |
+| Pin 1 +5V | Do not connect |
+
+ArduPilot parameters:
+
+```text
+SERIAL2_PROTOCOL = 2
+SERIAL2_BAUD = 115
+BRD_SER2_RTSCTS = 0
+```
+
+## Raspberry Pi NRF24 Pins
+
+| NRF24L01+ | Raspberry Pi 4B |
+|---|---|
+| VCC | 5V through HW-200/base regulator, or stable 3.3V regulator |
+| GND | GND |
+| CE | GPIO25 / physical pin 22 |
+| CSN | GPIO8 / SPI0 CE0 / physical pin 24 |
+| SCK | GPIO11 / physical pin 23 |
+| MOSI | GPIO10 / physical pin 19 |
+| MISO | GPIO9 / physical pin 21 |
+
+## ESP32 Pins
+
+NRF24L01+ on ESP32 VSPI:
+
+| NRF24L01+ | ESP32 |
+|---|---|
+| VCC | VIN/5V through HW-200/base regulator |
+| GND | GND |
+| CE | GPIO4 |
+| CSN | GPIO5 |
+| SCK | GPIO18 |
+| MOSI | GPIO23 |
+| MISO | GPIO19 |
+
+OLED:
+
+| OLED | ESP32 |
+|---|---|
+| SDA | GPIO21 |
+| SCL | GPIO22 |
+| VCC | 3.3V or 5V |
+| GND | GND |
+
+## Run on Raspberry Pi
+
+Install Python dependencies:
+
 ```bash
-git clone https://github.com/TheLostLeo/drone_telemetry.git
-cd drone_telemetry
-
-# Create and activate python virtual environment
+cd ~/drone_telemetry
 python3 -m venv venv
 source venv/bin/activate
-
-# Install required dependencies
 pip install -r requirements.txt
 ```
 
----
-
-### 2. Run the Master Companion Server
-
-#### A. Bench Testing Mode (Pixhawk plugged into Pi via USB):
-```bash
-python3 pi/main.py --port /dev/ttyACM0 --baud 115200 --web-port 8000
-```
-
-#### B. Flight Mode (Pixhawk TELEM2 DF13 connected to Pi GPIO UART):
-```bash
-python3 pi/main.py --port /dev/serial0 --baud 115200 --web-port 8000
-```
-
-#### C. NRF-only bridge mode (frontend runs from the laptop through the ESP32):
-```bash
-python3 pi/main.py --port /dev/serial0 --baud 115200 --no-web
-```
-
-#### D. Simulation Mode (Runs full virtual flight physics without hardware):
-```bash
-python3 pi/main.py --simulate --web-port 8000
-```
-
----
-
-### 3. Open Mission Control Web Dashboard
-Open any browser on your phone, tablet, or laptop connected to the same Wi-Fi network:
-```
-http://<your-raspberry-pi-ip>:8000
-```
-
-For the standalone React dashboard in `web/`, the ESP32 serves the live NRF telemetry snapshot at:
-```
-http://drone-esp32.local/telemetry.json
-```
-
-Set `WIFI_STA_SSID` and `WIFI_STA_PASSWORD` at the top of `esp/esp.ino` before flashing the ESP32. The ESP32 joins that Wi-Fi network, prints its assigned IP address on Serial, and shows the IP on the OLED. If mDNS is not available on your laptop, use the OLED IP directly:
-```
-http://localhost:5173/?telemetryUrl=http://<esp-ip>/telemetry.json
-```
-
-If Wi-Fi credentials are not set or connection fails, the ESP32 falls back to an access point named `DroneTelemetryESP32` with password `drone12345`.
-
----
-
-## 🧪 Sensor Stream Diagnostic Test
-
-To quickly verify that the Pixhawk is streaming raw attitude, 3-axis gyro rates, and barometric altitude over USB:
+Live Pixhawk over TELEM2 UART:
 
 ```bash
-python3 test_stream.py
+python3 pi/main.py --port /dev/serial0 --baud 115200 --radio-rate 5
 ```
 
-**Expected Output:**
-```
-[*] Connecting to Pixhawk on /dev/ttyACM0 (115200 baud)...
-[*] Waiting for Heartbeat...
-[✓] Heartbeat received! System: 1, Component: 1
-
-======================================================================
-  🚀 LISTENING FOR LIVE SENSOR PACKETS (TILT THE PIXHAWK NOW!)
-======================================================================
->>> [LIVE ATTITUDE] Roll:  +14.2° | Pitch:   -3.5° | Yaw: 182.1°
->>> [LIVE IMU]      Z-Accel: 9810 | X-Gyro: +120
->>> [LIVE ATTITUDE] Roll:  +28.6° | Pitch:  +10.1° | Yaw: 184.3°
-```
-
----
-
-## 🔌 Hardware Wiring & Pinouts
-
-### 1. Pixhawk TELEM2 to Raspberry Pi 4B (GPIO UART)
-| Pixhawk TELEM2 Pin | Signal | Raspberry Pi 40-Pin Header | Physical Pin |
-|---|---|---|---|
-| Pin 1 (Red) | VCC 5V | **Do NOT connect** (Pi powered independently) | — |
-| Pin 2 (TX) | Pixhawk TX | GPIO 15 (RXD0) | **Pin 10** |
-| Pin 3 (RX) | Pixhawk RX | GPIO 14 (TXD0) | **Pin 8** |
-| Pin 4 (CTS) | CTS | Not used | — |
-| Pin 5 (RTS) | RTS | Not used | — |
-| Pin 6 (Black) | GND | Ground | **Pin 9** |
-
----
-
-### 2. NRF24L01+ Transceiver to Raspberry Pi 4B (SPI0)
-| NRF24L01+ Pin | Raspberry Pi Pin | Physical Pin | Function |
-|---|---|---|---|
-| **VCC** | 3.3V Power | **Pin 1** or **Pin 17** | 3.3V Logic (10-100µF capacitor recommended across VCC/GND) |
-| **GND** | Ground | **Pin 6**, **Pin 9**, or **Pin 25** | Ground |
-| **CE** | GPIO 25 | **Pin 22** | Chip Enable |
-| **CSN** | GPIO 8 / SPI0 CE0 | **Pin 24** | SPI Chip Select |
-| **SCK** | GPIO 11 (SCLK) | **Pin 23** | SPI Clock |
-| **MOSI** | GPIO 10 (MOSI) | **Pin 19** | SPI Data Out |
-| **MISO** | GPIO 9 (MISO) | **Pin 21** | SPI Data In |
-
----
-
-### 3. ESP32 Handheld Receiver & SH1106 1.3" OLED
-Flash firmware in `esp/esp.ino` using Arduino IDE:
-* **OLED SDA** $\rightarrow$ ESP32 GPIO 21
-* **OLED SCL** $\rightarrow$ ESP32 GPIO 22
-* **NRF24 CE** $\rightarrow$ ESP32 GPIO 4
-* **NRF24 CSN** $\rightarrow$ ESP32 GPIO 5
-* **NRF24 SCK** $\rightarrow$ ESP32 GPIO 18
-* **NRF24 MOSI** $\rightarrow$ ESP32 GPIO 23
-* **NRF24 MISO** $\rightarrow$ ESP32 GPIO 19
-
----
-
-## 🤖 Systemd Background Autostart
-
-To configure the companion server to start automatically whenever the Raspberry Pi boots:
+Live Pixhawk over USB:
 
 ```bash
-# Enable and start background systemd service
-sudo ./setup_autostart.sh
-
-# Check live service status and logs
-sudo systemctl status drone-telemetry.service
-sudo journalctl -u drone-telemetry.service -f
-
-# Disable autostart
-sudo ./disable_autostart.sh
+python3 pi/main.py --port /dev/ttyACM0 --baud 115200 --radio-rate 5
 ```
 
----
+NRF test without Pixhawk:
 
-## ❓ Frequently Asked Questions (FAQ)
+```bash
+python3 pi/main.py --simulate --radio-rate 5
+```
 
-#### Q: Why does the battery voltage show `USB 5V` / `0.00V` during bench testing?
-> When the Pixhawk is powered only via a USB cable, the 5V bus powers the internal processor and IMU sensors directly. The 6-pin **Power Module** port (connected to the LiPo battery voltage divider ADC) has no battery attached, so ArduPilot correctly reports `0.00V`. Once you plug a 3S/4S/6S LiPo battery into the power module on the drone, live voltage and current readings will appear automatically.
+`--no-web` is still accepted for old commands, but the Pi no longer hosts the frontend. The web dashboard runs from `web/` and reads ESP32 JSON.
 
-#### Q: How does the PID tracking graph work on the bench?
-> In `STABILIZE` mode with RC sticks centered, ArduPilot commands a target level angle of $0.0^\circ$. As you tilt the Pixhawk in your hand, the measured roll/pitch diverges from the target, showing the real-time tracking error that the PID control loop would correct in the air.
+## Flash ESP32
+
+1. Open `esp/esp.ino` in Arduino IDE.
+2. Set `WIFI_STA_SSID` and `WIFI_STA_PASSWORD`.
+3. Flash the ESP32.
+4. Open Serial Monitor at `115200`.
+5. Confirm the ESP32 prints its IP address and NRF status.
+
+The ESP32 serves telemetry at:
+
+```text
+http://<esp-ip>/telemetry.json
+```
+
+Example:
+
+```text
+http://10.160.142.17/telemetry.json
+```
+
+## Run the Web Dashboard
+
+From the laptop:
+
+```bash
+cd web
+docker build -t drone-telemetry-dashboard-web .
+docker run --rm -p 5173:5173 drone-telemetry-dashboard-web
+```
+
+Open:
+
+```text
+http://localhost:5173/?telemetryUrl=http://10.160.142.17/telemetry.json
+```
+
+## What to Expect
+
+On the Pi, live Pixhawk mode should show:
+
+```text
+[+] Opened serial port '/dev/serial0' at 115200 baud.
+[*] Waiting for MAVLink Heartbeat from Pixhawk...
+[✓] Heartbeat received from Pixhawk
+[✓ LIVE] Mode: STABILIZE | ...
+```
+
+If battery shows `USB 5V`, the Pixhawk is not reporting LiPo voltage yet. Connect/configure the power module for real battery voltage.
+
+If satellites stay `0`, the GPS has no fix or GPS data is not available indoors.
