@@ -19,7 +19,7 @@ Description:
 import time
 import math
 import threading
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 class MAVLinkManager:
     def __init__(self, port: str = "/dev/serial0", baud: int = 115200, simulate: bool = False):
@@ -100,6 +100,7 @@ class MAVLinkManager:
             "target_yaw": 0.0,
             "error_roll": 0.0,
             "error_pitch": 0.0,
+            "error_yaw": 0.0,
             
             # 10. Motor Power Outputs (Motors 1 to 4)
             "motor_pwm": [1000, 1000, 1000, 1000],
@@ -107,6 +108,9 @@ class MAVLinkManager:
             
             # Timing & Status
             "last_packet_timestamp": 0.0,
+            "last_heartbeat_timestamp": 0.0,
+            "last_message_type": "",
+            "mavlink_status": "Waiting for serial port",
             "connected": False
         }
 
@@ -403,20 +407,27 @@ class MAVLinkManager:
                         target_sys, comp_id, s, 10, 1
                     )
 
-            # 3. Modern message intervals (in microseconds)
-            intervals = {
-                mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE: 100000,            # 10 Hz
-                mavutil.mavlink.MAVLINK_MSG_ID_RAW_IMU: 100000,             # 10 Hz
-                mavutil.mavlink.MAVLINK_MSG_ID_SCALED_IMU: 100000,          # 10 Hz
-                mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT: 200000, # 5 Hz
-                mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT: 200000,         # 5 Hz
-                mavutil.mavlink.MAVLINK_MSG_ID_VFR_HUD: 200000,             # 5 Hz
-                mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS: 500000,          # 2 Hz
-                mavutil.mavlink.MAVLINK_MSG_ID_BATTERY_STATUS: 500000,      # 2 Hz
-                mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW: 200000,    # 5 Hz
-                mavutil.mavlink.MAVLINK_MSG_ID_NAV_CONTROLLER_OUTPUT: 200000# 5 Hz
-            }
-            for msg_id, interval_us in intervals.items():
+            intervals = [
+                ("MAVLINK_MSG_ID_ATTITUDE", 100000),
+                ("MAVLINK_MSG_ID_ATTITUDE_TARGET", 100000),
+                ("MAVLINK_MSG_ID_RAW_IMU", 100000),
+                ("MAVLINK_MSG_ID_SCALED_IMU", 100000),
+                ("MAVLINK_MSG_ID_HIGHRES_IMU", 100000),
+                ("MAVLINK_MSG_ID_GLOBAL_POSITION_INT", 200000),
+                ("MAVLINK_MSG_ID_GPS_RAW_INT", 200000),
+                ("MAVLINK_MSG_ID_VFR_HUD", 200000),
+                ("MAVLINK_MSG_ID_SYS_STATUS", 500000),
+                ("MAVLINK_MSG_ID_BATTERY_STATUS", 500000),
+                ("MAVLINK_MSG_ID_SERVO_OUTPUT_RAW", 200000),
+                ("MAVLINK_MSG_ID_RC_CHANNELS", 200000),
+                ("MAVLINK_MSG_ID_RADIO_STATUS", 500000),
+                ("MAVLINK_MSG_ID_NAV_CONTROLLER_OUTPUT", 200000),
+                ("MAVLINK_MSG_ID_MISSION_CURRENT", 500000),
+            ]
+            for msg_name, interval_us in intervals:
+                msg_id = getattr(mavutil.mavlink, msg_name, None)
+                if msg_id is None:
+                    continue
                 self.mav.mav.command_long_send(
                     target_sys, target_comp,
                     mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
@@ -426,11 +437,202 @@ class MAVLinkManager:
         except Exception:
             pass
 
+    def _set_connection_state(self, connected: bool, status: str):
+        with self._lock:
+            self.state["connected"] = connected
+            self.state["mavlink_status"] = status
+            if not connected:
+                self.state["flight_mode"] = "NO HEARTBEAT" if "packet" in status.lower() else "DISCONNECTED"
+
+    def _heading(self, value, scale: float = 1.0):
+        try:
+            return round((float(value) / scale) % 360.0, 2)
+        except Exception:
+            return None
+
+    def _yaw_error(self, target: float, actual: float) -> float:
+        return round((target - actual + 180.0) % 360.0 - 180.0, 2)
+
+    def _update_attitude_errors(self):
+        self.state["error_roll"] = round(self.state["target_roll"] - self.state["attitude_roll"], 2)
+        self.state["error_pitch"] = round(self.state["target_pitch"] - self.state["attitude_pitch"], 2)
+        self.state["error_yaw"] = self._yaw_error(self.state["target_yaw"], self.state["attitude_yaw"])
+
+    def _mode_name(self, custom_mode) -> str:
+        try:
+            mode_map = self.mav.mode_mapping() if self.mav else {}
+            inv_map = {v: k for k, v in mode_map.items()}
+            return inv_map.get(custom_mode, f"MODE_{custom_mode}")
+        except Exception:
+            return f"MODE_{custom_mode}"
+
+    def _handle_mavlink_message(self, msg, mavutil, now: Optional[float] = None) -> bool:
+        msg_type = msg.get_type()
+        if msg_type in ("BAD_DATA", "UNKNOWN"):
+            return False
+
+        now = now or time.time()
+        with self._lock:
+            self.state["last_packet_timestamp"] = now
+            self.state["last_message_type"] = msg_type
+            self.state["connected"] = True
+            self.state["mavlink_status"] = "Receiving MAVLink telemetry"
+
+            if msg_type == 'HEARTBEAT':
+                self.state["last_heartbeat_timestamp"] = now
+                self.state["armed"] = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
+                self.state["flight_mode"] = self._mode_name(msg.custom_mode)
+                sys_status_map = {
+                    0: "UNINIT", 1: "BOOT", 2: "CALIBRATING", 3: "STANDBY",
+                    4: "ACTIVE", 5: "CRITICAL", 6: "EMERGENCY", 7: "POWEROFF"
+                }
+                self.state["system_status"] = sys_status_map.get(msg.system_status, "ACTIVE")
+
+            elif msg_type == 'SYS_STATUS':
+                if 0 < msg.voltage_battery < 65535:
+                    self.state["battery_voltage"] = round(msg.voltage_battery / 1000.0, 2)
+                if msg.current_battery >= 0:
+                    self.state["battery_current"] = round(msg.current_battery / 100.0, 1)
+                if 0 <= msg.battery_remaining <= 100:
+                    self.state["battery_remaining"] = msg.battery_remaining
+
+            elif msg_type == 'BATTERY_STATUS':
+                raw_cells = list(getattr(msg, "voltages", []) or [])[:6]
+                valid_cells = []
+                for value in raw_cells:
+                    valid_cells.append(round(value / 1000.0, 3) if 500 <= value < 65535 else 0.0)
+                valid_cells.extend([0.0] * (6 - len(valid_cells)))
+                self.state["cell_voltages"] = valid_cells
+                active_cells = [cell for cell in valid_cells if cell > 1.0]
+                if active_cells:
+                    self.state["cell_delta_mv"] = int(round((max(active_cells) - min(active_cells)) * 1000))
+                    if self.state["battery_voltage"] <= 0.5:
+                        self.state["battery_voltage"] = round(sum(active_cells), 2)
+                if msg.current_battery >= 0:
+                    self.state["battery_current"] = round(msg.current_battery / 100.0, 1)
+                if 0 <= msg.battery_remaining <= 100:
+                    self.state["battery_remaining"] = msg.battery_remaining
+
+            elif msg_type == 'GLOBAL_POSITION_INT':
+                self.state["latitude"] = round(msg.lat / 1e7, 7)
+                self.state["longitude"] = round(msg.lon / 1e7, 7)
+                self.state["altitude_relative"] = round(msg.relative_alt / 1000.0, 2)
+                self.state["altitude_msl"] = round(msg.alt / 1000.0, 2)
+                heading = self._heading(msg.hdg, 100.0) if msg.hdg != 65535 else None
+                if heading is not None:
+                    self.state["heading"] = heading
+
+            elif msg_type == 'GPS_RAW_INT':
+                if msg.satellites_visible != 255:
+                    self.state["satellites"] = msg.satellites_visible
+                fix_map = {0: "NO FIX", 1: "NO FIX", 2: "2D FIX", 3: "3D FIX", 4: "DGPS", 5: "RTK FLT", 6: "RTK FIX"}
+                self.state["gps_fix_type"] = fix_map.get(msg.fix_type, "NO FIX")
+                if 0 < msg.eph < 65535:
+                    self.state["hdop"] = round(msg.eph / 100.0, 2)
+                else:
+                    self.state["hdop"] = 99.9
+
+            elif msg_type == 'VFR_HUD':
+                self.state["climb_rate"] = round(msg.climb, 2)
+                self.state["ground_speed"] = round(msg.groundspeed, 2)
+                heading = self._heading(msg.heading)
+                if heading is not None:
+                    self.state["heading"] = heading
+                if hasattr(msg, 'alt') and msg.alt is not None:
+                    self.state["altitude_msl"] = round(msg.alt, 2)
+                    if self.state["altitude_relative"] == 0.0:
+                        self.state["altitude_relative"] = round(msg.alt, 2)
+
+            elif msg_type in ('ATTITUDE', 'AHRS2', 'AHRS3'):
+                if hasattr(msg, 'roll'):
+                    self.state["attitude_roll"] = round(math.degrees(msg.roll), 2)
+                    self.state["attitude_pitch"] = round(math.degrees(msg.pitch), 2)
+                    self.state["attitude_yaw"] = round(math.degrees(msg.yaw) % 360, 2)
+                if hasattr(msg, 'rollspeed'):
+                    self.state["gyro_x"] = round(math.degrees(msg.rollspeed), 2)
+                    self.state["gyro_y"] = round(math.degrees(msg.pitchspeed), 2)
+                    self.state["gyro_z"] = round(math.degrees(msg.yawspeed), 2)
+                if self.state["heading"] == 0:
+                    self.state["heading"] = self.state["attitude_yaw"]
+                self._update_attitude_errors()
+
+            elif msg_type == 'ATTITUDE_TARGET':
+                try:
+                    q = msg.q
+                    sinr_cosp = 2 * (q[0] * q[1] + q[2] * q[3])
+                    cosr_cosp = 1 - 2 * (q[1] * q[1] + q[2] * q[2])
+                    self.state["target_roll"] = round(math.degrees(math.atan2(sinr_cosp, cosr_cosp)), 2)
+                    sinp = 2 * (q[0] * q[2] - q[3] * q[1])
+                    self.state["target_pitch"] = round(math.degrees(math.asin(max(-1.0, min(1.0, sinp)))), 2)
+                    siny_cosp = 2 * (q[0] * q[3] + q[1] * q[2])
+                    cosy_cosp = 1 - 2 * (q[2] * q[2] + q[3] * q[3])
+                    self.state["target_yaw"] = round(math.degrees(math.atan2(siny_cosp, cosy_cosp)) % 360, 2)
+                    self._update_attitude_errors()
+                except Exception:
+                    pass
+
+            elif msg_type == 'NAV_CONTROLLER_OUTPUT':
+                self.state["target_roll"] = round(msg.nav_roll, 2)
+                self.state["target_pitch"] = round(msg.nav_pitch, 2)
+                bearing = self._heading(msg.target_bearing)
+                if bearing is not None:
+                    self.state["target_yaw"] = bearing
+                if hasattr(msg, "wp_dist"):
+                    self.state["dist_to_target_wp_m"] = max(0.0, round(float(msg.wp_dist), 1))
+                self._update_attitude_errors()
+
+            elif msg_type == 'HIGHRES_IMU':
+                self.state["accel_x"] = round(msg.xacc, 2)
+                self.state["accel_y"] = round(msg.yacc, 2)
+                self.state["accel_z"] = round(msg.zacc, 2)
+                self.state["gyro_x"] = round(math.degrees(msg.xgyro), 2)
+                self.state["gyro_y"] = round(math.degrees(msg.ygyro), 2)
+                self.state["gyro_z"] = round(math.degrees(msg.zgyro), 2)
+
+            elif msg_type in ('RAW_IMU', 'SCALED_IMU', 'SCALED_IMU2', 'SCALED_IMU3'):
+                self.state["accel_x"] = round((msg.xacc / 1000.0) * 9.81, 2)
+                self.state["accel_y"] = round((msg.yacc / 1000.0) * 9.81, 2)
+                self.state["accel_z"] = round((msg.zacc / 1000.0) * 9.81, 2)
+                if hasattr(msg, 'xgyro'):
+                    self.state["gyro_x"] = round(math.degrees(msg.xgyro / 1000.0), 2)
+                    self.state["gyro_y"] = round(math.degrees(msg.ygyro / 1000.0), 2)
+                    self.state["gyro_z"] = round(math.degrees(msg.zgyro / 1000.0), 2)
+
+            elif msg_type == 'SERVO_OUTPUT_RAW':
+                pwms = [msg.servo1_raw, msg.servo2_raw, msg.servo3_raw, msg.servo4_raw]
+                self.state["motor_pwm"] = pwms
+                self.state["motor_percent"] = [max(0, min(100, int((p - 1000) / 10.0))) for p in pwms]
+
+            elif msg_type == 'RC_CHANNELS':
+                if 0 <= msg.rssi < 255:
+                    self.state["rc_rssi"] = int((msg.rssi / 254.0) * 100)
+
+            elif msg_type == 'RADIO_STATUS':
+                if 0 <= msg.rssi < 255:
+                    self.state["radio_link_quality"] = int((msg.rssi / 254.0) * 100)
+                if 0 <= msg.remrssi < 255 and self.state["rc_rssi"] <= 0:
+                    self.state["rc_rssi"] = int((msg.remrssi / 254.0) * 100)
+
+            elif msg_type == 'MISSION_CURRENT':
+                self.state["mission_current_seq"] = msg.seq
+                total = getattr(msg, "total", 0) or self.state.get("mission_total_items", 0)
+                if total > 0:
+                    self.state["mission_total_items"] = total
+                    self.state["mission_progress_percent"] = min(100, int((msg.seq / float(total)) * 100))
+                self.state["mission_state"] = f"ACTIVE (WP {msg.seq}/{total})"
+
+            elif msg_type == 'MISSION_ITEM_REACHED':
+                self.state["mission_current_seq"] = msg.seq + 1
+                self.state["mission_state"] = f"REACHED WP {msg.seq}"
+
+        return True
+
     def _run_live_mavlink(self):
         try:
             from pymavlink import mavutil
         except ImportError:
             print("[!] ERROR: 'pymavlink' is not installed. Run: pip install pymavlink")
+            self._set_connection_state(False, "pymavlink is not installed")
             return
 
         ports_to_try = [self.port, "/dev/ttyACM0", "/dev/serial0", "/dev/ttyAMA0", "/dev/ttyUSB0"]
@@ -447,10 +649,12 @@ class MAVLinkManager:
 
             if not mav_conn:
                 print(f"[!] Waiting for Pixhawk serial connection ({self.port}). Retrying in 2s...")
+                self._set_connection_state(False, f"Waiting for Pixhawk serial port {self.port}")
                 time.sleep(2.0)
                 continue
 
             self.mav = mav_conn
+            self._set_connection_state(False, "Serial port open, waiting for MAVLink heartbeat")
 
             print("[*] Waiting for MAVLink Heartbeat from Pixhawk...")
             try:
@@ -459,10 +663,11 @@ class MAVLinkManager:
                     tgt_sys = getattr(self.mav, "target_system", 1) or 1
                     tgt_comp = getattr(self.mav, "target_component", 1) or 1
                     print(f"[✓] Heartbeat received from Pixhawk (System: {tgt_sys}, Component: {tgt_comp})")
-                    with self._lock:
-                        self.state["connected"] = True
+                    self._handle_mavlink_message(hb, mavutil)
+                else:
+                    self._set_connection_state(False, "Serial open but no MAVLink heartbeat")
             except Exception:
-                pass
+                self._set_connection_state(False, "Serial open but heartbeat wait failed")
 
             # Activate streams and send companion heartbeat
             self._send_companion_heartbeat(mavutil)
@@ -486,182 +691,22 @@ class MAVLinkManager:
                         last_stream_request_time = now
                         self._request_all_streams(mavutil)
 
-                    # 3. Check for 10-second Heartbeat Loss Timeout
-                    last_pkt = self.state.get("last_packet_timestamp", 0.0)
-                    if self.state.get("connected", False) and last_pkt > 0 and (now - last_pkt > 10.0):
-                        with self._lock:
-                            self.state["connected"] = False
-                            self.state["flight_mode"] = "NO HEARTBEAT"
+                    with self._lock:
+                        last_pkt = self.state.get("last_packet_timestamp", 0.0)
+                        was_connected = self.state.get("connected", False)
+                    if was_connected and last_pkt > 0 and (now - last_pkt > 10.0):
+                        self._set_connection_state(False, "No MAVLink packets for 10 seconds")
 
-                    # 3. Read incoming packets (drain all pending in buffer)
                     packets_read = 0
                     while packets_read < 50:
                         msg = self.mav.recv_match(blocking=False)
                         if not msg:
                             break
                         packets_read += 1
-
-                        msg_type = msg.get_type()
-
                         try:
-                            with self._lock:
-                                self.state["last_packet_timestamp"] = now
-                                self.state["connected"] = True
-
-                                # 1. HEARTBEAT
-                                if msg_type == 'HEARTBEAT':
-                                    self.state["armed"] = (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED) != 0
-                                    try:
-                                        mode_map = self.mav.mode_mapping()
-                                        inv_map = {v: k for k, v in mode_map.items()}
-                                        self.state["flight_mode"] = inv_map.get(msg.custom_mode, f"MODE_{msg.custom_mode}")
-                                    except Exception:
-                                        self.state["flight_mode"] = f"MODE_{msg.custom_mode}"
-                                    
-                                    sys_status_map = {
-                                        0: "UNINIT", 1: "BOOT", 2: "CALIBRATING", 3: "STANDBY",
-                                        4: "ACTIVE", 5: "CRITICAL", 6: "EMERGENCY"
-                                    }
-                                    self.state["system_status"] = sys_status_map.get(msg.system_status, "ACTIVE")
-
-                                # 2. SYS_STATUS
-                                elif msg_type == 'SYS_STATUS':
-                                    if msg.voltage_battery > 0:
-                                        self.state["battery_voltage"] = round(msg.voltage_battery / 1000.0, 2)
-                                    if msg.current_battery >= 0:
-                                        self.state["battery_current"] = round(msg.current_battery / 100.0, 1)
-                                    if 0 <= msg.battery_remaining <= 100:
-                                        self.state["battery_remaining"] = msg.battery_remaining
-
-                                # 3. BATTERY_STATUS
-                                elif msg_type == 'BATTERY_STATUS':
-                                    if len(msg.voltages) > 0:
-                                        valid_cells = []
-                                        for v in msg.voltages[:6]:
-                                            if v not in (0, 65535):
-                                                cell_v = round(v / 1000.0, 3)
-                                                valid_cells.append(cell_v)
-                                            else:
-                                                valid_cells.append(0.0)
-                                        self.state["cell_voltages"] = valid_cells
-                                        active_cells = [c for c in valid_cells if c > 1.0]
-                                        if active_cells:
-                                            delta = int((max(active_cells) - min(active_cells)) * 1000)
-                                            self.state["cell_delta_mv"] = max(0, delta)
-                                    if msg.current_battery >= 0:
-                                        self.state["battery_current"] = round(msg.current_battery / 100.0, 1)
-                                    if 0 <= msg.battery_remaining <= 100:
-                                        self.state["battery_remaining"] = msg.battery_remaining
-
-                                # 4. GLOBAL_POSITION_INT
-                                elif msg_type == 'GLOBAL_POSITION_INT':
-                                    self.state["latitude"] = round(msg.lat / 1e7, 7)
-                                    self.state["longitude"] = round(msg.lon / 1e7, 7)
-                                    self.state["altitude_relative"] = round(msg.relative_alt / 1000.0, 1)
-                                    self.state["altitude_msl"] = round(msg.alt / 1000.0, 1)
-                                    if msg.hdg != 65535 and msg.hdg != 0:
-                                        self.state["heading"] = round(msg.hdg / 100.0, 1)
-
-                                # 5. GPS_RAW_INT
-                                elif msg_type == 'GPS_RAW_INT':
-                                    self.state["satellites"] = msg.satellites_visible
-                                    fix_map = {0: "NO FIX", 1: "NO FIX", 2: "2D FIX", 3: "3D FIX", 4: "DGPS", 5: "RTK FLT", 6: "RTK FIX"}
-                                    self.state["gps_fix_type"] = fix_map.get(msg.fix_type, "NO FIX" if msg.fix_type == 0 else "3D FIX")
-                                    self.state["hdop"] = round(msg.eph / 100.0, 2)
-
-                                # 6. VFR_HUD
-                                elif msg_type == 'VFR_HUD':
-                                    self.state["climb_rate"] = round(msg.climb, 2)
-                                    self.state["ground_speed"] = round(msg.groundspeed, 2)
-                                    if msg.heading != 0:
-                                        self.state["heading"] = round(msg.heading, 1)
-                                    if hasattr(msg, 'alt') and msg.alt is not None:
-                                        self.state["altitude_msl"] = round(msg.alt, 1)
-                                        if self.state["altitude_relative"] == 0.0:
-                                            self.state["altitude_relative"] = round(msg.alt, 1)
-
-                                # 7. ATTITUDE & AHRS (Euler Angles & Angular Rates)
-                                elif msg_type in ('ATTITUDE', 'AHRS2', 'AHRS3'):
-                                    if hasattr(msg, 'roll'):
-                                        self.state["attitude_roll"] = round(math.degrees(msg.roll), 2)
-                                        self.state["attitude_pitch"] = round(math.degrees(msg.pitch), 2)
-                                        self.state["attitude_yaw"] = round(math.degrees(msg.yaw) % 360, 2)
-                                    if hasattr(msg, 'rollspeed'):
-                                        self.state["gyro_x"] = round(math.degrees(msg.rollspeed), 2)
-                                        self.state["gyro_y"] = round(math.degrees(msg.pitchspeed), 2)
-                                        self.state["gyro_z"] = round(math.degrees(msg.yawspeed), 2)
-                                    if self.state["heading"] == 0 and "attitude_yaw" in self.state:
-                                        self.state["heading"] = self.state["attitude_yaw"]
-                                    self.state["error_roll"] = round(self.state["target_roll"] - self.state["attitude_roll"], 2)
-                                    self.state["error_pitch"] = round(self.state["target_pitch"] - self.state["attitude_pitch"], 2)
-
-                                # 8. ATTITUDE_TARGET & NAV_CONTROLLER_OUTPUT
-                                elif msg_type == 'ATTITUDE_TARGET':
-                                    try:
-                                        q = msg.q
-                                        sinr_cosp = 2 * (q[0] * q[1] + q[2] * q[3])
-                                        cosr_cosp = 1 - 2 * (q[1] * q[1] + q[2] * q[2])
-                                        self.state["target_roll"] = round(math.degrees(math.atan2(sinr_cosp, cosr_cosp)), 2)
-                                        sinp = 2 * (q[0] * q[2] - q[3] * q[1])
-                                        if abs(sinp) >= 1:
-                                            self.state["target_pitch"] = round(math.copysign(90, sinp), 2)
-                                        else:
-                                            self.state["target_pitch"] = round(math.degrees(math.asin(sinp)), 2)
-                                    except Exception:
-                                        pass
-                                elif msg_type == 'NAV_CONTROLLER_OUTPUT':
-                                    self.state["target_roll"] = round(msg.nav_roll, 2)
-                                    self.state["target_pitch"] = round(msg.nav_pitch, 2)
-                                    self.state["target_yaw"] = round(msg.target_bearing, 2)
-                                    self.state["error_roll"] = round(msg.nav_roll - self.state["attitude_roll"], 2)
-                                    self.state["error_pitch"] = round(msg.nav_pitch - self.state["attitude_pitch"], 2)
-
-                                # 9. HIGHRES_IMU / RAW_IMU / SCALED_IMU
-                                elif msg_type == 'HIGHRES_IMU':
-                                    self.state["accel_x"] = round(msg.xacc, 2)
-                                    self.state["accel_y"] = round(msg.yacc, 2)
-                                    self.state["accel_z"] = round(msg.zacc, 2)
-                                    self.state["gyro_x"] = round(math.degrees(msg.xgyro), 2)
-                                    self.state["gyro_y"] = round(math.degrees(msg.ygyro), 2)
-                                    self.state["gyro_z"] = round(math.degrees(msg.zgyro), 2)
-                                elif msg_type in ('RAW_IMU', 'SCALED_IMU', 'SCALED_IMU2', 'SCALED_IMU3'):
-                                    self.state["accel_x"] = round((msg.xacc / 1000.0) * 9.81, 2)
-                                    self.state["accel_y"] = round((msg.yacc / 1000.0) * 9.81, 2)
-                                    self.state["accel_z"] = round((msg.zacc / 1000.0) * 9.81, 2)
-                                    if hasattr(msg, 'xgyro') and self.state["gyro_x"] == 0:
-                                        self.state["gyro_x"] = round(math.degrees(msg.xgyro / 1000.0), 2)
-                                        self.state["gyro_y"] = round(math.degrees(msg.ygyro / 1000.0), 2)
-                                        self.state["gyro_z"] = round(math.degrees(msg.zgyro / 1000.0), 2)
-
-                                # 10. SERVO_OUTPUT_RAW (Motor PWMs 1-4)
-                                elif msg_type == 'SERVO_OUTPUT_RAW':
-                                    pwms = [msg.servo1_raw, msg.servo2_raw, msg.servo3_raw, msg.servo4_raw]
-                                    self.state["motor_pwm"] = pwms
-                                    self.state["motor_percent"] = [
-                                        max(0, min(100, int((p - 1000) / 10.0))) for p in pwms
-                                    ]
-
-                                # 11. RC_CHANNELS
-                                elif msg_type == 'RC_CHANNELS':
-                                    if msg.rssi > 0:
-                                        self.state["rc_rssi"] = int((msg.rssi / 255.0) * 100)
-                                    else:
-                                        self.state["rc_rssi"] = 90
-
-                                # 12. MISSION_CURRENT & MISSION_ITEM_REACHED
-                                elif msg_type == 'MISSION_CURRENT':
-                                    self.state["mission_current_seq"] = msg.seq
-                                    tot = self.state.get("mission_total_items", 0)
-                                    if tot > 0:
-                                        self.state["mission_progress_percent"] = min(100, int((msg.seq / float(tot)) * 100))
-                                    self.state["mission_state"] = f"ACTIVE (WP {msg.seq}/{tot})"
-
-                                elif msg_type == 'MISSION_ITEM_REACHED':
-                                    self.state["mission_current_seq"] = msg.seq + 1
-                                    self.state["mission_state"] = f"REACHED WP {msg.seq}"
-
-                        except Exception:
-                            pass
+                            self._handle_mavlink_message(msg, mavutil, now)
+                        except Exception as e:
+                            print(f"[!] MAVLink decode error ({msg.get_type()}): {e}")
 
                     time.sleep(0.005) # Yield CPU
 
@@ -858,8 +903,12 @@ class MAVLinkManager:
                     "target_yaw": round(sim_heading, 1),
                     "error_roll": round(-roll_actual, 2),
                     "error_pitch": round(-pitch_actual, 2),
+                    "error_yaw": 0.0,
                     "motor_pwm": [m1, m2, m3, m4],
                     "motor_percent": [int((m - 1000) / 10.0) for m in [m1, m2, m3, m4]],
                     "last_packet_timestamp": time.time(),
+                    "last_heartbeat_timestamp": time.time(),
+                    "last_message_type": "SIMULATION",
+                    "mavlink_status": "Simulation telemetry running",
                     "connected": True
                 })

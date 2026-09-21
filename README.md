@@ -84,13 +84,15 @@ http://<your-raspberry-pi-ip>:8000
 
 For the standalone React dashboard in `web/`, the ESP32 serves the live NRF telemetry snapshot at:
 ```
-http://192.168.4.1/telemetry.json
+http://drone-esp32.local/telemetry.json
 ```
 
-The ESP32 starts an access point named `DroneTelemetryESP32` with password `drone12345`. The dashboard polls that JSON endpoint and falls back to mock telemetry if the ESP32 is not reachable. To point the dashboard at a different ESP address:
+Set `WIFI_STA_SSID` and `WIFI_STA_PASSWORD` at the top of `esp/esp.ino` before flashing the ESP32. The ESP32 joins that Wi-Fi network, prints its assigned IP address on Serial, and shows the IP on the OLED. If mDNS is not available on your laptop, use the OLED IP directly:
 ```
 http://localhost:5173/?telemetryUrl=http://<esp-ip>/telemetry.json
 ```
+
+If Wi-Fi credentials are not set or connection fails, the ESP32 falls back to an access point named `DroneTelemetryESP32` with password `drone12345`.
 
 ---
 

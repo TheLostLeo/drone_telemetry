@@ -34,6 +34,7 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ESPmDNS.h>
 #include <RF24.h>
 #include <U8g2lib.h>
 
@@ -58,8 +59,11 @@
 #define FRAME_ATTITUDE 2
 #define FRAME_MOTORS 3
 
-const char* WIFI_AP_SSID = "DroneTelemetryESP32";
-const char* WIFI_AP_PASSWORD = "drone12345";
+const char* WIFI_STA_SSID = "gamma";
+const char* WIFI_STA_PASSWORD = "gammared";
+const char* WIFI_HOSTNAME = "drone-esp32";
+const char* WIFI_FALLBACK_AP_SSID = "DroneTelemetryESP32";
+const char* WIFI_FALLBACK_AP_PASSWORD = "drone12345";
 const uint16_t HTTP_PORT = 80;
 
 struct __attribute__((packed)) TelemetryPacket {
@@ -222,6 +226,8 @@ uint32_t g_sbcUptime = 0;
 bool g_hasReceivedData = false;
 bool g_heartbeatState = false;
 bool g_radioHardwareOk = false;
+bool g_wifiApMode = false;
+String g_wifiIpText = "0.0.0.0";
 unsigned long g_lastPacketTime = 0;
 const unsigned long DISCONNECT_TIMEOUT_MS = 10000; // 10 seconds timeout
 
@@ -471,23 +477,42 @@ void drawDisconnectScreen(unsigned long elapsedMs) {
   u8g2.print(F("! NO CONNECTION !"));
   u8g2.setDrawColor(1);
 
-  // Status Message
   u8g2.setFont(u8g2_font_ncenB08_tr);
-  u8g2.setCursor(16, 34);
+  u8g2.setCursor(16, 32);
   u8g2.print(F("Telemetry Lost"));
 
-  // Elapsed Loss Time Counter
   u8g2.setFont(u8g2_font_6x12_tf);
-  u8g2.setCursor(14, 50);
+  u8g2.setCursor(10, 46);
   if (!g_hasReceivedData) {
-    u8g2.print(F("Waiting for link..."));
+    u8g2.print(F("Waiting NRF link"));
   } else {
     unsigned long elapsedSec = elapsedMs / 1000;
-    u8g2.print(F("Lost: "));
+    u8g2.print(F("Lost "));
     u8g2.print(elapsedSec);
-    u8g2.print(F("s ago"));
+    u8g2.print(F("s"));
   }
 
+  u8g2.setCursor(10, 59);
+  u8g2.print(F("IP:"));
+  u8g2.print(g_wifiIpText);
+
+  u8g2.sendBuffer();
+}
+
+void drawWifiStatusScreen(const __FlashStringHelper* title, const char* ssid, const String& ipText) {
+  u8g2.clearBuffer();
+  u8g2.drawRFrame(0, 0, 128, 64, 4);
+  u8g2.setFont(u8g2_font_6x12_tf);
+  u8g2.setCursor(10, 14);
+  u8g2.print(title);
+  u8g2.setCursor(10, 30);
+  u8g2.print(F("SSID:"));
+  u8g2.print(ssid);
+  u8g2.setCursor(10, 46);
+  u8g2.print(F("IP:"));
+  u8g2.print(ipText);
+  u8g2.setCursor(10, 59);
+  u8g2.print(F("/telemetry.json"));
   u8g2.sendBuffer();
 }
 
@@ -541,11 +566,16 @@ void drawTelemetryScreen() {
   }
 
   u8g2.setCursor(2, 58);
-  u8g2.print(F("LON: "));
-  if (g_longitude != 0.0) {
-    u8g2.print(g_longitude, 6);
+  if ((millis() / 4000) % 2 == 0) {
+    u8g2.print(F("LON: "));
+    if (g_longitude != 0.0) {
+      u8g2.print(g_longitude, 6);
+    } else {
+      u8g2.print(F("NO FIX"));
+    }
   } else {
-    u8g2.print(F("NO FIX"));
+    u8g2.print(F("IP: "));
+    u8g2.print(g_wifiIpText);
   }
 
   u8g2.sendBuffer();
@@ -679,7 +709,10 @@ void handleTelemetryJson() {
 
 void handleRoot() {
   addCorsHeaders();
-  server.send(200, F("text/plain"), F("ESP32 drone telemetry JSON: /telemetry.json"));
+  String message = F("ESP32 drone telemetry JSON: http://");
+  message += g_wifiIpText;
+  message += F("/telemetry.json");
+  server.send(200, F("text/plain"), message);
 }
 
 void handleOptions() {
@@ -687,9 +720,61 @@ void handleOptions() {
   server.send(204);
 }
 
-void setupWifiApi() {
+bool hasStationCredentials() {
+  return strlen(WIFI_STA_SSID) > 0 &&
+         strcmp(WIFI_STA_SSID, "YOUR_WIFI_SSID") != 0 &&
+         strcmp(WIFI_STA_PASSWORD, "YOUR_WIFI_PASSWORD") != 0;
+}
+
+void startFallbackAccessPoint() {
+  g_wifiApMode = true;
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD);
+  WiFi.softAP(WIFI_FALLBACK_AP_SSID, WIFI_FALLBACK_AP_PASSWORD);
+  g_wifiIpText = WiFi.softAPIP().toString();
+
+  Serial.print(F("[WIFI] Fallback AP started: "));
+  Serial.print(WIFI_FALLBACK_AP_SSID);
+  Serial.print(F(" / "));
+  Serial.println(g_wifiIpText);
+
+  drawWifiStatusScreen(F("WIFI AP MODE"), WIFI_FALLBACK_AP_SSID, g_wifiIpText);
+}
+
+void setupWifiApi() {
+  g_wifiApMode = false;
+  WiFi.setHostname(WIFI_HOSTNAME);
+
+  if (hasStationCredentials()) {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASSWORD);
+    drawWifiStatusScreen(F("WIFI CONNECTING"), WIFI_STA_SSID, F("..."));
+
+    Serial.print(F("[WIFI] Connecting to "));
+    Serial.println(WIFI_STA_SSID);
+
+    unsigned long startMs = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startMs < 15000) {
+      delay(300);
+      Serial.print('.');
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      g_wifiIpText = WiFi.localIP().toString();
+      Serial.print(F("[WIFI] Connected: "));
+      Serial.print(WIFI_STA_SSID);
+      Serial.print(F(" / "));
+      Serial.println(g_wifiIpText);
+      drawWifiStatusScreen(F("WIFI CONNECTED"), WIFI_STA_SSID, g_wifiIpText);
+    } else {
+      Serial.println(F("[WIFI] Station connection failed. Starting fallback AP."));
+      startFallbackAccessPoint();
+    }
+  } else {
+    Serial.println(F("[WIFI] Station credentials not set. Starting fallback AP."));
+    startFallbackAccessPoint();
+  }
+
   server.on("/", HTTP_GET, handleRoot);
   server.on("/telemetry.json", HTTP_GET, handleTelemetryJson);
   server.on("/api/telemetry", HTTP_GET, handleTelemetryJson);
@@ -698,10 +783,16 @@ void setupWifiApi() {
   server.onNotFound(handleRoot);
   server.begin();
 
-  Serial.print(F("[WIFI] AP started: "));
-  Serial.print(WIFI_AP_SSID);
-  Serial.print(F(" / "));
-  Serial.println(WiFi.softAPIP());
+  if (MDNS.begin(WIFI_HOSTNAME)) {
+    MDNS.addService("http", "tcp", HTTP_PORT);
+    Serial.print(F("[MDNS] http://"));
+    Serial.print(WIFI_HOSTNAME);
+    Serial.println(F(".local/telemetry.json"));
+  }
+
+  Serial.print(F("[HTTP] Telemetry JSON: http://"));
+  Serial.print(g_wifiIpText);
+  Serial.println(F("/telemetry.json"));
 }
 
 // ======================================================================================
@@ -714,7 +805,6 @@ void setup() {
   Serial.println(F("\n\n=============================================="));
   Serial.println(F("    ESP32 Drone Telemetry Receiver Booting    "));
   Serial.println(F("=============================================="));
-  setupWifiApi();
 
   // 1. Initialize Hardware I2C and SH1106 OLED
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
@@ -731,6 +821,8 @@ void setup() {
   u8g2.setCursor(22, 45);
   u8g2.print(F("Initializing..."));
   u8g2.sendBuffer();
+
+  setupWifiApi();
 
   // 2. Initialize VSPI Bus
   SPI.begin(PIN_NRF_SCK, PIN_NRF_MISO, PIN_NRF_MOSI, -1);

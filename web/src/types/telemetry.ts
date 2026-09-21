@@ -88,8 +88,18 @@ export interface GyroPoint {
   z: number;
 }
 
+export type TelemetrySourceStatus = "online" | "stale" | "offline";
+
+export interface TelemetrySource {
+  status: TelemetrySourceStatus;
+  endpoint: string;
+  message: string;
+  lastUpdated: number;
+}
+
 export interface Telemetry {
   clock: number;
+  source: TelemetrySource;
   battery: BatteryState;
   nav: NavState;
   altitude: AltitudeState;
